@@ -1,0 +1,182 @@
+;; Todo application — DAG executor style
+;;
+;; You control the decomposition. Each node is an explicit unit of work
+;; with declared dependencies. Claude Code is scoped per node via :claude-md.
+;;
+;; Stages:
+;;   1. Scaffold       — project structure, deps.edn, namespace skeletons
+;;   2. Core logic     — todo atom store + CRUD fns (depends on scaffold)
+;;   3. HTTP handlers  — ring handlers for GET/POST/DELETE (depends on core)
+;;   4. UI             — hiccup templates + htmx wiring (depends on handlers)
+;;   5. Tests          — unit + integration tests (depends on all three)
+;;   6. Review         — human checkpoint before shipping
+;;
+;; Usage from REPL:
+;;   (def graph (edn/read-string (slurp "graphs/examples/todo-app-dag.edn")))
+;;   (def run   (engine/execute! 1 graph {:project-dir "/path/to/new/project"}))
+
+{:graph/id      :todo-app-dag
+ :graph/version "1.0.0"
+
+ :graph/params
+ {:project-dir nil            ; set to your target project path at runtime
+  :language    "Clojure"
+  :http        "http-kit + reitit"
+  :html        "hiccup2 + htmx"}
+
+ :graph/default-model
+ {:model-id    "claude-sonnet-4-6"
+  :temperature 0.2
+  :max-tokens  8192}
+
+ :graph/nodes
+ [;; ── 1. Scaffold ──────────────────────────────────────────────────────────
+  {:id         :scaffold
+   :type       :task
+   :depends-on []
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: scaffold
+## Your job
+Create the project skeleton for a Clojure todo app. Write these files:
+- `deps.edn` with http-kit, reitit, hiccup2, clojure.test
+- `src/todo/core.clj`      — namespace stub only
+- `src/todo/store.clj`     — namespace stub only
+- `src/todo/handlers.clj`  — namespace stub only
+- `src/todo/ui.clj`        — namespace stub only
+- `test/todo/core_test.clj` — namespace stub only
+
+## Constraints
+- Use Clojure 1.12, http-kit 2.7, reitit 0.7, hiccup2 2.0
+- No framework magic — plain functions
+- Each stub must have a correct ns form and a TODO comment
+
+## Done when
+All six files exist and `clj -e '(require (quote todo.core))'` exits 0."
+   :prompt     "Scaffold a Clojure todo app project at {{project-dir}}."
+   :done-check "clj -e '(require (quote todo.core))'"
+   :output-key :scaffold/output}
+
+  ;; ── 2. Core logic ────────────────────────────────────────────────────────
+  {:id         :implement-core
+   :type       :task
+   :depends-on [:scaffold]
+   :inputs     {:project-dir [:graph/params :project-dir]
+                :scaffold    [:scaffold/output]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: implement-core
+## Your job
+Implement `src/todo/store.clj`. It manages an in-memory list of todos using
+a plain Clojure atom. No database, no protocols.
+
+The store must expose:
+  (all-todos)              → vec of todo maps
+  (get-todo id)            → todo map or nil
+  (create-todo! title)     → created todo map
+  (toggle-todo! id)        → updated todo map
+  (delete-todo! id)        → nil
+
+A todo map is:
+  {:id <uuid-string> :title <string> :done? <boolean> :created-at <inst>}
+
+## Constraints
+- Single atom at the top of the namespace
+- No global mutable state outside that atom
+- All fns are pure except the ! ones
+
+## Done when
+`clj -M:test -n todo.store-test` exits 0."
+   :prompt     "Implement the todo store in {{project-dir}}/src/todo/store.clj."
+   :done-check "clj -M:test -n todo.store-test"
+   :output-key :implement-core/output}
+
+  ;; ── 3. HTTP handlers ─────────────────────────────────────────────────────
+  {:id         :implement-handlers
+   :type       :task
+   :depends-on [:implement-core]
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: implement-handlers
+## Your job
+Implement `src/todo/handlers.clj` — Ring/reitit request handlers.
+
+Routes to implement:
+  GET  /        → render all todos (delegates to todo.ui/index-page)
+  POST /todos   → create todo from form param :title, redirect to /
+  POST /todos/:id/toggle → toggle :done?, redirect to /
+  POST /todos/:id/delete → delete todo, redirect to /
+
+## Constraints
+- Use ring.util.response/redirect for all mutations
+- No HTML generation here — that belongs in todo.ui
+- Validate :title is non-blank on create; return 400 otherwise
+
+## Done when
+`clj -M:test -n todo.handlers-test` exits 0."
+   :prompt     "Implement HTTP handlers in {{project-dir}}/src/todo/handlers.clj."
+   :done-check "clj -M:test -n todo.handlers-test"
+   :output-key :implement-handlers/output}
+
+  ;; ── 4. UI layer ──────────────────────────────────────────────────────────
+  {:id         :implement-ui
+   :type       :task
+   :depends-on [:implement-handlers]
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: implement-ui
+## Your job
+Implement `src/todo/ui.clj` — hiccup2 page templates.
+
+Functions to write:
+  (index-page todos) → full HTML page hiccup
+
+The page must include:
+- A form with a text input and 'Add' button that POSTs to /todos
+- A list of todos, each showing: title, done? checkbox (POST toggle), delete button
+- Minimal inline CSS — no external stylesheets
+- htmx for the toggle and delete actions so the page doesn't fully reload
+
+## Constraints
+- Return hiccup data structures, not strings
+- No JavaScript beyond htmx loaded from unpkg CDN
+- Completed todos should have a strikethrough style
+
+## Done when
+The page renders valid HTML: `clj -e '(require (quote todo.ui)) (todo.ui/index-page [])' | grep '<html'` exits 0."
+   :prompt     "Implement the UI in {{project-dir}}/src/todo/ui.clj."
+   :done-check "clj -e '(require (quote todo.ui)) (todo.ui/index-page [])'"
+   :output-key :implement-ui/output}
+
+  ;; ── 5. Tests ─────────────────────────────────────────────────────────────
+  {:id         :implement-tests
+   :type       :task
+   :depends-on [:implement-core :implement-handlers :implement-ui]
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: implement-tests
+## Your job
+Write a complete test suite covering:
+  `test/todo/store_test.clj`    — all store fns (CRUD, toggle, missing id)
+  `test/todo/handlers_test.clj` — handler responses (status codes, redirects, 400 on blank)
+  `test/todo/ui_test.clj`       — index-page contains expected HTML strings
+
+## Constraints
+- Use clojure.test only — no third-party test libs
+- At least 3 assertions per namespace
+- Tests must be deterministic — reset the atom between test cases
+
+## Done when
+`clj -M:test` exits 0 with no failures."
+   :prompt     "Write the test suite for the todo app in {{project-dir}}."
+   :done-check "clj -M:test"
+   :output-key :implement-tests/output}
+
+  ;; ── 6. Human review ──────────────────────────────────────────────────────
+  {:id         :review
+   :type       :checkpoint
+   :depends-on [:implement-tests]
+   :present    [:implement-tests/output :implement-ui/output]
+   :actions    [:approve :revise :abort]
+   :on-revise  {:re-run     :implement-tests
+                :inject-key :review/feedback}
+   :output-key :review/decision}]}

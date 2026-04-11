@@ -1,0 +1,56 @@
+;; Todo application (React + TypeScript) — Wiggum loop style
+;;
+;; Demonstrates that the Wiggum loop is language and framework agnostic.
+;; Claude Code handles npm, tsc, vite, vitest — the orchestrator only
+;; cares that the success-check exits 0.
+;;
+;; Usage from REPL:
+;;   (def cfg (edn/read-string (slurp "graphs/examples/todo-app-react-wiggum.edn")))
+;;   (def run (wiggum/execute! 1 (assoc cfg :project-dir "/path/to/new/project")))
+;;
+;;   ;; Stream events
+;;   @(:state run)
+;;   @(:iterations run)
+;;
+;;   ;; Step through manually
+;;   (wiggum/step! run)
+;;   (wiggum/resume! run {:action :step})
+
+{:objective
+ "Build a working React todo app using TypeScript and Vite.
+
+  The app must:
+  - Bootstrap with `npm create vite@latest . -- --template react-ts`
+  - Manage todo state with useState — no Redux, no Zustand, no context API
+  - Support add, toggle-done, delete, and filter (all / active / completed)
+  - Persist todos to localStorage so they survive a page refresh
+  - Be styled with plain CSS modules — no Tailwind, no CSS-in-JS
+  - Have a passing test suite using Vitest and React Testing Library
+    covering: adding a todo, toggling done, deleting, filtering, localStorage roundtrip
+
+  Stack: React 18, TypeScript 5, Vite 5, Vitest 1, @testing-library/react 14."
+
+ :project-dir nil            ; set at runtime: (assoc cfg :project-dir "...")
+
+ :success-check "npm test -- --run"
+
+ :constraints
+ ["Run `npm install` before writing any source files if node_modules is absent"
+  "Keep all todo logic in a single custom hook — do not scatter state across components"
+  "Write tests alongside each feature, not at the end"]
+
+ :anti-goals
+ ["Do not install a state management library — useState and a custom hook are enough"
+  "Do not create shared utility files or helper modules that are only used once"
+  "Do not leave TODO comments or unimplemented stubs in committed code"]
+
+ :max-iterations  15
+ :step-once?      false
+
+ :fallback-model    "claude-haiku-4-5-20251001"
+ :fallback-delay-ms 20000
+
+ :model-config
+ {:model-id    "claude-sonnet-4-6"
+  :temperature 0.2
+  :max-tokens  8192}}

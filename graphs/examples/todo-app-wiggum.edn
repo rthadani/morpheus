@@ -1,0 +1,56 @@
+;; Todo application — Wiggum loop style
+;;
+;; You state the objective and the success check. The loop handles
+;; decomposition, sequencing, and course correction autonomously.
+;; The supervisor steers between iterations based on evidence — no
+;; explicit node graph required.
+;;
+;; Usage from REPL:
+;;   (def cfg  (edn/read-string (slurp "graphs/examples/todo-app-wiggum.edn")))
+;;   (def run  (wiggum/execute! 1 (assoc cfg :project-dir "/path/to/new/project")))
+;;
+;;   ;; Watch it run
+;;   @(:state run)
+;;   @(:iterations run)
+;;
+;;   ;; Step-once — pause after each iteration to review
+;;   (wiggum/step! run)
+;;   (wiggum/resume! run {:action :step})
+
+{:objective
+ "Build a working Clojure todo app.
+
+  The app must:
+  - Run an HTTP server on port 3000 (http-kit + reitit)
+  - Persist todos in a plain atom for the lifetime of the process
+  - Support create, toggle-done, and delete via HTML form POSTs
+  - Render the todo list as an HTML page using hiccup2
+  - Use htmx so toggle and delete don't require a full page reload
+  - Have a passing test suite covering store, handlers, and UI
+
+  Stack: Clojure 1.12, http-kit 2.7, reitit 0.7, hiccup2 2.0, clojure.test."
+
+ :project-dir nil            ; set at runtime: (assoc cfg :project-dir "...")
+
+ :success-check "clj -M:test"
+
+ :constraints
+ ["Write tests alongside implementation — do not defer them to the end"
+  "Prefer editing existing files over creating new ones once the skeleton exists"
+  "No external CSS frameworks or JS libraries beyond htmx from unpkg CDN"]
+
+ :anti-goals
+ ["Do not add a database, ORM, or any persistence beyond an in-memory atom"
+  "Do not create utility namespaces or helper files that aren't immediately used"
+  "Do not stub out functions and leave them for a later iteration"]
+
+ :max-iterations  12
+ :step-once?      false      ; set to true to pause and review after each iteration
+
+ :fallback-model  "claude-haiku-4-5-20251001"   ; used automatically on rate limit
+ :fallback-delay-ms 20000
+
+ :model-config
+ {:model-id    "claude-sonnet-4-6"
+  :temperature 0.2
+  :max-tokens  8192}}
