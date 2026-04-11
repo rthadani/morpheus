@@ -18,14 +18,15 @@
    (may grow via graph-expand). All mutable state in atoms."
   [run-id graph initial-context]
   (let [event-ch (chan 64)]
-    {:run-id      run-id
-     :graph-atom  (atom graph)
-     :context     (atom (merge (:graph/context graph) initial-context))
-     :state       (atom {})          ; node-id → :pending|:running|:done|:paused|:error
-     :event-ch    event-ch
-     :event-mult  (async/mult event-ch) ; created once; SSE taps into this
-     :resume-ch   (chan 1)              ; human action → executor (approve/revise/abort)
-     :started-at  (System/currentTimeMillis)}))
+    {:run-id         run-id
+     :graph-atom     (atom graph)
+     :context        (atom (merge (:graph/context graph) initial-context))
+     :state          (atom {})          ; node-id → :pending|:running|:done|:paused|:error
+     :output-buffers (atom {})          ; node-id → accumulated stdout string (live)
+     :event-ch       event-ch
+     :event-mult     (async/mult event-ch) ; created once; SSE taps into this
+     :resume-ch      (chan 1)              ; human action → executor (approve/revise/abort)
+     :started-at     (System/currentTimeMillis)}))
 
 ;; ──────────────────────────────────────────
 ;; State helpers
@@ -45,12 +46,19 @@
 (defn- run-node!
   "Resolves inputs, calls dispatch, stores output.
    Returns :done, :paused, or :error."
-  [{:keys [context graph-atom event-ch] :as run} node]
-  (let [resolved (ctx/resolve-inputs (:inputs node {}) @context)
-        start    (System/currentTimeMillis)]
+  [{:keys [context graph-atom event-ch output-buffers] :as run} node]
+  (let [default-model (get-in @graph-atom [:graph/default-model :model-id])
+        node          (if (and default-model (nil? (:model node)))
+                        (assoc node :model default-model)
+                        node)
+        _             (when output-buffers
+                        (swap! output-buffers assoc (:id node) ""))
+        ctx-with-buf  (assoc @context ::output-buffers output-buffers)
+        resolved      (ctx/resolve-inputs (:inputs node {}) ctx-with-buf)
+        start         (System/currentTimeMillis)]
     (try
       (let [output   (dispatch/execute-node!
-                       node resolved @context graph-atom event-ch)
+                       node resolved ctx-with-buf graph-atom event-ch)
             duration (- (System/currentTimeMillis) start)]
         (if (= output dispatch/checkpoint-sentinel)
           :paused

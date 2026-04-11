@@ -85,7 +85,7 @@ body { background: var(--bg3); overflow: hidden; }
 
 .wg-shell {
   display: grid;
-  grid-template-columns: 200px 1fr 280px;
+  grid-template-columns: 180px 1fr 420px;
   grid-template-rows: 44px auto 1fr auto;
   height: 100vh;
   background: var(--bg);
@@ -199,7 +199,10 @@ body { background: var(--bg3); overflow: hidden; }
 
 @keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-.iter-row-files { display: flex; gap: 6px; }
+.iter-row-files  { display: flex; gap: 6px; }
+.iter-row-tokens { display: flex; gap: 4px; margin-top: 2px; }
+.tok-in  { font-size: 10px; color: var(--text3); }
+.tok-out { font-size: 10px; color: var(--text3); }
 .files-new  { font-size: 10px; color: var(--green); }
 .files-edit { font-size: 10px; color: var(--blue);  }
 
@@ -215,10 +218,11 @@ body { background: var(--bg3); overflow: hidden; }
   margin-bottom: 16px; padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
 }
-.iter-detail-title { font-size: 14px; font-weight: 600; }
-.iter-detail-dur   { font-size: 11px; color: var(--text3); }
-.iter-detail-model { font-size: 10px; color: var(--text3);
-                     font-family: ui-monospace, monospace; margin-left: auto; }
+.iter-detail-title  { font-size: 14px; font-weight: 600; }
+.iter-detail-dur    { font-size: 11px; color: var(--text3); }
+.iter-detail-tokens { font-size: 10px; color: var(--text3); font-family: ui-monospace, monospace; }
+.iter-detail-model  { font-size: 10px; color: var(--text3);
+                      font-family: ui-monospace, monospace; margin-left: auto; }
 
 .iter-section { margin-bottom: 14px; }
 .iter-section-label {

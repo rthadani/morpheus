@@ -23,10 +23,11 @@
         result   (transient [])]
     (loop [q queue edges in-edges]
       (if (empty? q)
-        (if (= (count (persistent! result)) (count nodes))
-          (persistent! result)
-          (throw (ex-info "Cycle detected in graph"
-                          {:remaining (keys edges)})))
+        (let [sorted (persistent! result)]
+          (if (= (count sorted) (count nodes))
+            sorted
+            (throw (ex-info "Cycle detected in graph"
+                            {:remaining (keys edges)}))))
         (let [n    (peek q)
               rest (pop q)]
           (conj! result (nmap n))

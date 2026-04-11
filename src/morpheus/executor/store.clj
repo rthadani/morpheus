@@ -29,6 +29,8 @@
   {:run-id     (:run-id run)
    :type       :dag
    :state      @(:state run)
+   :nodes      (-> @(:graph-atom run) :graph/nodes)
+   :state-map  @(:state run)
    :started-at (:started-at run)})
 
 (defn- wiggum-summary [run]

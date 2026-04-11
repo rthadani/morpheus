@@ -53,7 +53,15 @@
                               :prompt      prompt
                               :project-dir (:project-dir node)
                               :timeout-ms  (:timeout-ms node 300000)
-                              :auto?       (get node :auto? true)})]
+                              :model       (:model node)
+                              :auto?       (get node :auto? true)
+                              :on-output   (fn [line]
+                                             (when-let [bufs (::output-buffers context)]
+                                               (swap! bufs update (:id node) str line "\n"))
+                                             (async/put! event-ch
+                                               {:type    :node-output-line
+                                                :node-id (:id node)
+                                                :line    line}))})]
       (when (pos? (:exit result))
         (log/warn "Claude Code non-zero exit" {:node (:id node) :exit (:exit result)}))
       (async/put! event-ch {:type     :files-written

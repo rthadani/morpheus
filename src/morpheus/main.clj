@@ -90,7 +90,8 @@
                           (str "✗ exit=" (:exit v)))))))
 
     :run-paused
-    (println (str "\n⏸  Paused after iteration " (:iteration event)))
+    (println (str "\n⏸  Paused after iteration " (:iteration event)
+                  (if (:verified? event) "  ✓ verified" "  ✗ not verified")))
 
     :provider-fallback
     (println (str "⚠  Rate limit — retrying with " (:fallback event)
@@ -160,10 +161,14 @@
               ;; Wiggum pause — ask human to step / retry / abort
               :run-paused
               (let [action (prompt! "step / retry / abort")]
-                (wiggum/resume! run {:action action})
                 (if (= :abort action)
-                  :aborted
-                  (recur)))
+                  (do (wiggum/resume! run {:action :abort}) :aborted)
+                  (let [feedback (do (print "Feedback (optional, enter to skip): ")
+                                     (flush)
+                                     (let [fb (str/trim (or (read-line) ""))]
+                                       (when (seq fb) fb)))]
+                    (wiggum/resume! run {:action action :feedback feedback})
+                    (recur))))
 
               ;; Terminal events — stop looping and return result
               :run-complete :ok

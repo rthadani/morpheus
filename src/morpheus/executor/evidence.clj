@@ -74,19 +74,24 @@
   (let [before  (:before-snapshot cc-result {})
         after   (:after-snapshot  cc-result {})
         changes (classify-changes before after)]
-    {:iteration     iteration
-     :started-at    (:started-at  cc-result)
-     :duration-ms   (:duration-ms cc-result)
-     :files-written (:new changes)
-     :files-edited  (:edited changes)
-     :files-deleted (:deleted changes)
-     :exit-code     (:exit cc-result)
-     :output        (:stdout cc-result)
-     :stderr        (:stderr cc-result)
-     :verification  verification
-     :model         (or (:model cc-result) "unknown")
-     :provider      (or (:provider cc-result) "anthropic")
-     :slop-signals  (slop-signals changes)}))
+    (let [in-chars  (or (:prompt-chars cc-result) 0)
+          out-chars (count (or (:stdout cc-result) ""))]
+      {:iteration     iteration
+       :started-at    (:started-at  cc-result)
+       :duration-ms   (:duration-ms cc-result)
+       :files-written (:new changes)
+       :files-edited  (:edited changes)
+       :files-deleted (:deleted changes)
+       :exit-code     (:exit cc-result)
+       :output        (:stdout cc-result)
+       :stderr        (:stderr cc-result)
+       :verification  verification
+       :model         (or (:model cc-result) "unknown")
+       :provider      (or (:provider cc-result) "anthropic")
+       :slop-signals  (slop-signals changes)
+       :approx-tokens {:in  (int (/ in-chars 4))
+                       :out (int (/ out-chars 4))}
+       :cost-usd      (:cost-usd cc-result)})))
 
 ;; ──────────────────────────────────────────
 ;; Human-readable summary (for supervisor prompt)

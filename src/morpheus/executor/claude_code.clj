@@ -7,10 +7,12 @@
    [clojure.java.shell  :as shell]
    [clojure.java.io     :as io]
    [clojure.string      :as str]
+   [clojure.data.json   :as json]
    [taoensso.timbre     :as log])
   (:import
    [java.nio.file Files Path]
-   [java.nio.file.attribute FileAttribute]))
+   [java.nio.file.attribute FileAttribute]
+   [java.io BufferedReader InputStreamReader]))
 
 ;; ──────────────────────────────────────────
 ;; Working directory management
@@ -93,6 +95,42 @@
       inputs)))
 
 ;; ──────────────────────────────────────────
+;; Stream-JSON parsing
+;; ──────────────────────────────────────────
+
+(defn parse-stream-line
+  "Parses one stream-json line from claude --output-format stream-json.
+   Returns a map with:
+     :activity  — human-readable string of what CC just did (nil if nothing notable)
+     :result    — final text output (only present on the result line)
+     :cost-usd  — cost in USD (only present on the result line)"
+  [line]
+  (try
+    (let [ev (json/read-str line :key-fn keyword)]
+      (case (:type ev)
+        "assistant"
+        (let [blocks (get-in ev [:message :content] [])
+              parts  (keep (fn [b]
+                             (case (:type b)
+                               "text"     (let [t (str/trim (:text b ""))]
+                                            (when (seq t) (str "💭 " t)))
+                               "tool_use" (let [n   (:name b)
+                                                inp (some-> b :input
+                                                            (dissoc :description)
+                                                            pr-str)]
+                                            (str "🔧 " n (when inp (str " " inp))))
+                               nil))
+                           blocks)]
+          {:activity (when (seq parts) (str/join " · " parts))})
+
+        "result"
+        {:result   (or (:result ev) "")
+         :cost-usd (:cost_usd ev)}
+
+        {}))
+    (catch Exception _ {})))
+
+;; ──────────────────────────────────────────
 ;; Claude Code invocation
 ;; ──────────────────────────────────────────
 
@@ -101,7 +139,7 @@
 
 (defn run!
   "Runs Claude Code non-interactively in work-dir.
-   prompt is the task instruction passed via --print.
+   Streams stdout line-by-line via on-output callback as the process runs.
 
    Options:
      :work-dir    required — directory CC runs in
@@ -110,6 +148,7 @@
      :project-dir optional — path copied into work-dir before run
      :model       optional — model id string passed via --model flag
      :auto?       optional — skip all permission prompts (default true)
+     :on-output   optional — (fn [line]) called for each stdout line in real-time
 
    Returns:
    {:stdout          <full output string>
@@ -123,44 +162,86 @@
     :model           <model id or nil>
     :provider        \"anthropic\"
     :work-dir        <working directory path>}"
-  [{:keys [work-dir prompt timeout-ms project-dir model auto?]
+  [{:keys [work-dir prompt timeout-ms project-dir model auto? on-output]
     :or   {timeout-ms 300000 auto? true}}]
   (log/info "Claude Code run starting" {:work-dir work-dir
                                          :prompt-chars (count prompt)})
-  (let [;; if a project-dir is set, copy it into work-dir before snapshotting
-        _ (when project-dir
+  (let [_ (when project-dir
             (shell/sh "sh" "-c"
                       (str "cp -r " project-dir "/* " work-dir "/")
                       :dir work-dir))
         before-snapshot (snapshot-files work-dir)
         started-at      (System/currentTimeMillis)
-        model-args      (when model ["--model" model])
-        auto-args       (when auto? ["--dangerously-skip-permissions"])
-        result          (apply shell/sh
-                          (concat ["claude"
-                                   "--print"]         ; non-interactive, print output and exit
-                                  model-args
-                                  auto-args
-                                  [prompt
-                                   :dir work-dir
-                                   :env (into {} (System/getenv))]))
-        duration-ms     (- (System/currentTimeMillis) started-at)
-        after-snapshot  (snapshot-files work-dir)]
-    (log/info "Claude Code run complete"
-              {:exit (:exit result) :out-chars (count (:out result)) :duration-ms duration-ms})
-    (when (not (str/blank? (:err result)))
-      (log/warn "Claude Code stderr" (:err result)))
-    {:stdout          (:out result)
-     :stderr          (:err result)
-     :exit            (:exit result)
-     :files-written   (list-written-files work-dir)   ; kept for DAG engine compat
-     :before-snapshot before-snapshot
-     :after-snapshot  after-snapshot
-     :started-at      started-at
-     :duration-ms     duration-ms
-     :model           model
-     :provider        "anthropic"
-     :work-dir        work-dir}))
+        claude-cmd      (vec (concat ["claude" "--print" "--verbose"
+                                               "--output-format" "stream-json"]
+                                     (when model ["--model" model])
+                                     (when auto? ["--dangerously-skip-permissions"])
+                                     [prompt]))
+        ;; stdbuf forces line-buffered stdout so we get real-time output via pipe
+        stdbuf?         (zero? (:exit (shell/sh "which" "stdbuf")))
+        cmd             (if stdbuf?
+                          (vec (concat ["stdbuf" "-oL" "-eL"] claude-cmd))
+                          claude-cmd)
+        pb              (doto (ProcessBuilder. cmd)
+                          (.directory (io/file work-dir))
+                          (.redirectErrorStream false))
+        _               (.putAll (.environment pb) (System/getenv))
+        process         (.start pb)
+        stdout-buf      (StringBuilder.)
+        stderr-buf      (StringBuilder.)
+        ;; drain stderr on a separate thread to avoid blocking
+        stderr-thread   (doto (Thread.
+                                (fn []
+                                  (with-open [rdr (BufferedReader.
+                                                    (InputStreamReader.
+                                                      (.getErrorStream process)))]
+                                    (loop [line (.readLine rdr)]
+                                      (when line
+                                        (.append stderr-buf line)
+                                        (.append stderr-buf "\n")
+                                        (recur (.readLine rdr)))))))
+                          (.setDaemon true)
+                          .start)]
+    ;; read stdout line-by-line; parse stream-json for activity + final result
+    (let [result-text (atom nil)
+          cost-usd    (atom nil)]
+      (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
+        (loop [line (.readLine rdr)]
+          (when line
+            (.append stdout-buf line)
+            (.append stdout-buf "\n")
+            (let [parsed (parse-stream-line line)]
+              (when-let [r (:result parsed)]   (reset! result-text r))
+              (when-let [c (:cost-usd parsed)] (reset! cost-usd c))
+              (when (and on-output (:activity parsed))
+                (on-output (:activity parsed))))
+            (recur (.readLine rdr)))))
+      (.join stderr-thread)
+      (let [exited?   (.waitFor process (quot timeout-ms 1000) java.util.concurrent.TimeUnit/SECONDS)
+            _         (when-not exited? (.destroyForcibly process))
+            exit-code (if exited? (.exitValue process) 1)
+            stdout    (or @result-text (str stdout-buf))
+            stderr    (str stderr-buf)
+            duration-ms (- (System/currentTimeMillis) started-at)
+            after-snapshot (snapshot-files work-dir)]
+        (log/info "Claude Code run complete"
+                  {:exit exit-code :out-chars (count stdout) :duration-ms duration-ms
+                   :cost-usd @cost-usd})
+        (when (not (str/blank? stderr))
+          (log/warn "Claude Code stderr" stderr))
+        {:stdout          stdout
+         :stderr          stderr
+         :exit            exit-code
+         :files-written   (list-written-files work-dir)
+         :before-snapshot before-snapshot
+         :after-snapshot  after-snapshot
+         :started-at      started-at
+         :duration-ms     duration-ms
+         :prompt-chars    (count prompt)
+         :cost-usd        @cost-usd
+         :model           model
+         :provider        "anthropic"
+         :work-dir        work-dir}))))
 
 ;; ──────────────────────────────────────────
 ;; Plan mode — uses Claude Code's analysis without writing files

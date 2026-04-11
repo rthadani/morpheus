@@ -1,0 +1,59 @@
+;; Kanban board (React + TypeScript) — Wiggum loop, step-once mode
+;;
+;; Complex enough to need 5-8 genuine iterations:
+;;   1. Project scaffold + data model (Board, List, Card types + useKanban hook skeleton)
+;;   2. Core CRUD (add/rename/delete lists and cards, move cards between lists)
+;;   3. Drag-and-drop reorder (within a list and between lists)
+;;   4. Persistence (localStorage hydration + serialisation)
+;;   5. Test suite (hook unit tests + component integration tests)
+;;   6+ Polish / bug fixes until tests pass
+;;
+;; step-once? true — the loop pauses after every iteration.
+;; You review the work and type: step / retry / abort
+;;
+;; Usage:
+;;   clj -M:run graphs/examples/kanban-react-wiggum.edn --project-dir ./my-kanban
+
+{:objective
+ "Build a working Kanban board app in React + TypeScript + Vite.
+
+  The app must:
+  - Show multiple named lists side-by-side (e.g. To Do, In Progress, Done)
+  - Let the user add, rename, and delete lists
+  - Let the user add, edit, and delete cards within any list
+  - Support drag-and-drop reordering of cards within a list and between lists
+    using the HTML5 drag-and-drop API (no third-party DnD library)
+  - Persist the full board state to localStorage so it survives a page refresh
+  - Seed an initial board with 3 lists and 2 cards each on first load
+  - Have a passing test suite using Vitest and @testing-library/react covering:
+      adding a list, adding a card, deleting a card, moving a card between lists,
+      and localStorage round-trip
+
+  Stack: React 18, TypeScript 5, Vite 5, Vitest 1, @testing-library/react 14.
+  No Redux, no Zustand, no external DnD library."
+
+ :project-dir nil            ; set at runtime: --project-dir ./my-kanban
+
+ :success-check "npm test -- --run"
+
+ :constraints
+ ["Work in small increments — get one layer working and tested before moving to the next"
+  "Run `npm run build` at the end of every iteration to catch type errors early"
+  "Keep all board state in a single useKanban hook — do not scatter state across components"]
+
+ :anti-goals
+ ["Do not install react-beautiful-dnd, dnd-kit, or any drag-and-drop library"
+  "Do not add a backend, API, or database — localStorage only"
+  "Do not create shared utility files that are only used in one place"
+  "Do not leave placeholder components or TODO comments in committed code"]
+
+ :max-iterations  12
+ :step-once?      true       ; pause after every iteration for human review
+
+ :fallback-model    "claude-haiku-4-5-20251001"
+ :fallback-delay-ms 20000
+
+ :model-config
+ {:model-id    "claude-haiku-4-5-20251001"
+  :temperature 0.2
+  :max-tokens  8192}}

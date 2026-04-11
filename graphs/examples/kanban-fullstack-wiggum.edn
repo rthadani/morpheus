@@ -1,0 +1,106 @@
+;; Kanban board — full-stack with Docker deploy, Wiggum loop, step-once mode
+;;
+;; Natural iteration sequence:
+;;
+;;  Phase 1 — Frontend (React + TypeScript + Vite)
+;;   1.  Scaffold: Vite project, deps, test setup
+;;   2.  Data model: useKanban hook, Board/List/Card types
+;;   3.  Core CRUD: add/rename/delete lists and cards
+;;   4.  Drag-and-drop: HTML5 DnD, reorder within + between lists
+;;   5.  Frontend tests passing
+;;
+;;  Phase 2 — Backend (Node.js + Express + SQLite)
+;;   6.  Server scaffold: Express + TypeScript, SQLite via better-sqlite3
+;;   7.  DB schema + migrations: boards, lists, cards tables
+;;   8.  REST API: CRUD endpoints for boards, lists, cards
+;;   9.  Wire frontend to API (replace localStorage with fetch calls)
+;;   10. Backend + integration tests passing
+;;
+;;  Phase 3 — Deploy (Podman + podman-compose)
+;;   11. Dockerfile: multi-stage build (build frontend, serve via Express)
+;;   12. docker-compose.yml: app service + volume for SQLite db file
+;;   13. Health check endpoint, graceful shutdown
+;;   14. `docker-compose up` starts and all smoke tests pass
+;;
+;; step-once? true — pauses after every iteration for human review.
+;; At the terminal: step / retry / abort
+;; In the UI: Continue / Retry / Abort with optional feedback
+;;
+;; Usage:
+;;   clj -M:run graphs/examples/kanban-fullstack-wiggum.edn --project-dir ./my-kanban
+
+{:objective
+ "Build and deploy a full-stack Kanban board application.
+
+  === Phase 1: React frontend ===
+  - Multiple named lists side-by-side (To Do, In Progress, Done)
+  - Add, rename, delete lists
+  - Add, edit, delete cards within any list
+  - Drag-and-drop reorder using HTML5 DnD API (no DnD library)
+  - Vitest + React Testing Library test suite covering all CRUD operations
+
+  === Phase 2: Node.js backend + SQLite ===
+  - Express server in TypeScript on port 3001
+  - SQLite database via better-sqlite3 (file: db/kanban.db)
+  - DB schema: boards(id, name), lists(id, board_id, name, position),
+               cards(id, list_id, title, description, position)
+  - REST API:
+      GET    /api/health
+      GET    /api/boards/:id          — full board with lists and cards
+      POST   /api/lists               — create list
+      PATCH  /api/lists/:id           — rename or reposition
+      DELETE /api/lists/:id
+      POST   /api/cards               — create card
+      PATCH  /api/cards/:id           — edit or move to different list
+      DELETE /api/cards/:id
+  - Frontend fetches from the API (no more localStorage)
+  - Jest + supertest integration tests for all API endpoints
+
+  === Phase 3: Docker deploy ===
+  - Multi-stage Dockerfile: stage 1 builds frontend, stage 2 is Express server
+    that serves the built frontend as static files from /public
+  - docker-compose.yml: single `app` service, port 3001:3001,
+    named volume `kanban-data` mounted at /app/db for SQLite persistence
+  - GET /api/health returns {status: ok, uptime: <seconds>}
+  - `podman-compose up --build -d` starts cleanly
+  - `curl http://localhost:3001/api/health` returns 200
+  - `curl http://localhost:3001/` serves the React app HTML
+
+  Stack: React 18, TypeScript 5, Vite 5, Express 4, better-sqlite3, Vitest,
+  @testing-library/react, Jest, supertest, Docker.
+
+  === Phase 4: Documentation ===
+  - Create a README.md to make sure that describes the application as a summary
+  - Provide instructions in the README.md to build and deploy the application
+  - Update the Claude.md including any agents and skills that may be required to mantain the project in the future"
+
+ :project-dir nil
+
+ :success-check
+ "podman-compose up --build -d && sleep 8 && curl -sf http://localhost:3001/api/health && curl -sf http://localhost:3001/ | grep -q '<div id=\"root\"' && podman-compose down"
+
+ :constraints
+ ["Work phase by phase: complete and test the frontend before starting the backend,
+   complete and test the backend before writing the Dockerfile"
+  "Run the relevant test suite at the end of every iteration — do not skip tests"
+  "Run `npm run build` (frontend) or `tsc --noEmit` (server) each iteration to catch type errors"
+  "Keep all board state in a single useKanban hook in the frontend"
+  "Use a single Express app.ts entry point — do not split into many router files"]
+
+ :anti-goals
+ ["Do not install react-beautiful-dnd, dnd-kit, or any drag-and-drop library"
+  "Do not use an ORM — use better-sqlite3 directly with prepared statements"
+  "Do not add Redis, Postgres, or any dependency beyond what is listed in the objective"
+  "Do not create shared utility files or helper modules used only in one place"
+  "Do not leave TODO comments, unimplemented stubs, or placeholder routes"]
+
+ :max-iterations  20
+ :step-once?      false
+
+ :fallback-model    "claude-haiku-4-5-20251001"
+ :fallback-delay-ms 20000
+
+ :model-config
+ {:model-id    "claude-haiku-4-5-20251001"
+  :temperature 0.2
+  :max-tokens  8192}}

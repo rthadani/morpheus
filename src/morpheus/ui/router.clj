@@ -40,10 +40,14 @@
      :body    with-css}))
 
 (defn sse-event
-  "Format a server-sent event string."
+  "Format a server-sent event string.
+   Handles multi-line data by prefixing each line with 'data: '."
   [event-name data-html]
-  (str "event: " event-name "\n"
-       "data: " data-html "\n\n"))
+  (let [data-lines (->> (str/split data-html #"\n")
+                        (map #(str "data: " %))
+                        (str/join "\n"))]
+    (str "event: " event-name "\n"
+         data-lines "\n\n")))
 
 ;; ──────────────────────────────────────────
 ;; SSE — DAG run fragments
@@ -55,7 +59,13 @@
     (let [nodes (-> @(:graph-atom run) :graph/nodes)
           node  (first (filter #(= (:id %) (:node-id event)) nodes))]
       (when node
-        (str (h/html (ui/node-badge node (:state event) nil)))))
+        (str (h/html (ui/node-badge node (:state event) nil))
+             (when (= :running (:state event))
+               ;; OOB swap so the panel actually appears in the side pane
+               (h/html [:div#node-output.node-output
+                        {:hx-swap-oob "outerHTML:#node-output"}
+                        [:div.detail-label [:span (str (name (:id node)) " running…")]]
+                        [:pre#live-output.detail-pre "Claude Code working…"]])))))
 
     :checkpoint
     (str (h/html
@@ -78,6 +88,12 @@
                 (str "exit " ex)])]
             [:pre.detail-pre (or (:stdout event) "")]]))
 
+    :node-output-line
+    (str (h/html
+           [:span {:id "live-output" :hx-swap-oob "beforeend"}
+            (str (:line event) "\n")
+            [:br]]))
+
     nil))
 
 ;; ──────────────────────────────────────────
@@ -97,10 +113,14 @@
     (str (h/html
            [:div {:hx-swap-oob "outerHTML:#control-packet-panel"}
             (ui/control-packet-panel (:control-packet event))])
-         ;; show in-progress row at top of list
+         ;; replace the running-row placeholder (always present in DOM)
          (h/html
-           [:div {:hx-swap-oob "afterbegin:#iteration-list"}
-            (ui/iteration-running-row (:iteration event))])
+           (update (ui/iteration-running-row run-id (:iteration event))
+                   1 assoc :hx-swap-oob "outerHTML:#iter-row-running"))
+         ;; auto-show live output in the detail panel immediately
+         (h/html
+           [:div {:id "wg-detail" :hx-swap-oob "outerHTML:#wg-detail"}
+            (ui/iteration-live-panel (:iteration event))])
          (h/html
            [:div {:id "log-tail" :hx-swap-oob "beforeend"}
             (ui/log-line :info (str "→ iteration " (:iteration event) " started"))]))
@@ -176,6 +196,12 @@
               (ui/log-line :warn
                            (str (if milestone? "⭐ milestone" "⏸ paused")
                                 " after iteration " (:iteration event)))])))
+
+    :output-line
+    (str (h/html
+           [:span {:id "live-output" :hx-swap-oob "beforeend"}
+            (str (:line event) "\n")
+            [:br]]))
 
     :provider-fallback
     (str (h/html
@@ -282,10 +308,12 @@
           run     (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
-        (let [nodes  (-> @(:graph-atom run) :graph/nodes)
-              node   (first (filter #(= (:id %) node-id) nodes))
-              state  (get @(:state run) node-id :pending)
-              output (get @(:context run) (:output-key node))]
+        (let [nodes   (-> @(:graph-atom run) :graph/nodes)
+              node    (first (filter #(= (:id %) node-id) nodes))
+              state   (get @(:state run) node-id :pending)
+              output  (or (get @(:context run) (:output-key node))
+                          (when (= :running state)
+                            (get @(:output-buffers run) node-id)))]
           (html-resp (ui/node-detail node state output)))))))
 
 ;; ──────────────────────────────────────────
@@ -367,17 +395,23 @@
         {:status 404 :body "Run not found"}
         (case (store/run-type run)
           :wiggum (page-resp (ui/wiggum-shell-page run-id (store/run-summary run)))
-          :dag    (page-resp (ui/shell-page run-id "graph")))))))
+          :dag    (page-resp (ui/shell-page run-id (store/run-summary run))))))))
 
 (defn iteration-detail-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id (parse-long (:id path-params))
-          n      (parse-long (:n path-params))
-          run    (store/get-run run-store run-id)
-          ev     (when run (nth @(:iterations run) (dec n) nil))]
-      (if-not ev
-        {:status 404 :body "Iteration not found"}
-        (html-resp (ui/iteration-detail ev))))))
+    (let [run-id      (parse-long (:id path-params))
+          n           (parse-long (:n path-params))
+          run         (store/get-run run-store run-id)
+          ev          (when run (nth @(:iterations run) (dec n) nil))
+          live-output (when (and run (nil? ev) (= :running @(:state run)))
+                        (let [buf @(:live-output run)]
+                          (if (str/blank? buf)
+                            "Claude Code is working…"
+                            buf)))]
+      (cond
+        ev          (html-resp (ui/iteration-detail ev))
+        live-output (html-resp [:pre#live-output.iter-output.iter-output-live live-output])
+        :else       {:status 404 :body "Iteration not found"}))))
 
 ;; ──────────────────────────────────────────
 ;; Router

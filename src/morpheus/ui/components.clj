@@ -105,7 +105,7 @@
     (when exit
       [:span {:class (str "exit-badge" (when (pos? exit) " exit-nonzero"))}
        (str "exit " exit)])]
-   [:pre.detail-pre (or stdout "")]])
+   [:pre#live-output.detail-pre (or stdout "")]])
 
 (defn node-detail [node state output]
   (let [stdout    (if (map? output) (:output output) output)
@@ -135,13 +135,15 @@
 
 (defn iteration-row
   [run-id {:keys [iteration duration-ms files-written files-edited
-                  exit-code verification slop-signals]}]
+                  exit-code verification slop-signals approx-tokens]}]
   (let [secs    (int (/ (or duration-ms 0) 1000))
         ver-ok? (or (nil? verification) (zero? (:exit verification)))
         slop?   (let [s (or slop-signals {})]
                   (or (:helpers-added? s)
                       (:only-new-files? s)
-                      (> (or (:new-file-ratio s) 0) 70)))]
+                      (> (or (:new-file-ratio s) 0) 70)))
+        tok-in  (get approx-tokens :in 0)
+        tok-out (get approx-tokens :out 0)]
     [:div {:id       (str "iter-row-" iteration)
            :class    "iter-row"
            :hx-get   (str "/runs/" run-id "/iterations/" iteration)
@@ -155,10 +157,19 @@
       [:span.iter-row-dur (str secs "s")]]
      [:div.iter-row-files
       (when (seq files-written) [:span.files-new (str "+" (count files-written) " new")])
-      (when (seq files-edited)  [:span.files-edit (str "~" (count files-edited) " edited")])]]))
+      (when (seq files-edited)  [:span.files-edit (str "~" (count files-edited) " edited")])]
+     (when (pos? (+ tok-in tok-out))
+       [:div.iter-row-tokens
+        [:span.tok-in  (str "↑" tok-in "t")]
+        [:span.tok-out (str "↓" tok-out "t")]])]))
 
-(defn iteration-running-row [iteration]
-  [:div {:id "iter-row-running" :class "iter-row iter-row-running"}
+(defn iteration-running-row [run-id iteration]
+  [:div {:id       "iter-row-running"
+         :class    "iter-row iter-row-running"
+         :hx-get   (str "/runs/" run-id "/iterations/" iteration)
+         :hx-target "#wg-detail"
+         :hx-swap  "innerHTML"
+         :hx-trigger "click"}
    [:div.iter-row-top
     [:span.iter-row-num (str "#" iteration)]
     [:span.iter-badge.badge-running "…"]
@@ -176,16 +187,22 @@
 
 (defn iteration-detail
   [{:keys [iteration duration-ms files-written files-edited files-deleted
-           exit-code output verification slop-signals model]}]
+           exit-code output verification slop-signals model approx-tokens cost-usd]}]
   (let [secs    (int (/ (or duration-ms 0) 1000))
-        ver-ok? (or (nil? verification) (zero? (:exit verification)))]
+        ver-ok? (or (nil? verification) (zero? (:exit verification)))
+        tok-in  (get approx-tokens :in 0)
+        tok-out (get approx-tokens :out 0)]
     [:div.iter-detail
      [:div.iter-detail-header
       [:span.iter-detail-title (str "Iteration #" iteration)]
       [:span {:class (str "exit-badge" (when (pos? (or exit-code 0)) " exit-nonzero"))}
        (str "exit " exit-code)]
       [:span.iter-detail-dur (str secs "s")]
-      (when model [:span.iter-detail-model model])]
+      (when model [:span.iter-detail-model model])
+      (if cost-usd
+        [:span.iter-detail-tokens (format "$%.4f" (double cost-usd))]
+        (when (pos? (+ tok-in tok-out))
+          [:span.iter-detail-tokens (str "~" (+ tok-in tok-out) " tok")]))]
 
      (when (seq files-written)
        [:div.iter-section
@@ -223,8 +240,17 @@
         [:div.iter-section-label "Output"]
         [:pre.iter-output output]])]))
 
+(defn iteration-live-panel [iteration]
+  [:div#wg-detail.iter-detail
+   [:div.iter-detail-header
+    [:span.iter-detail-title (str "Iteration #" iteration)]
+    [:span.iter-badge.badge-running "running…"]]
+   [:pre#live-output.iter-output.iter-output-live
+    "Claude Code is working…"]])
+
 (defn iteration-detail-placeholder []
-  [:div.iter-detail-placeholder "← Select an iteration"])
+  [:div#wg-detail.iter-detail-placeholder
+   "← Select an iteration"])
 
 ;; ──────────────────────────────────────────
 ;; Wiggum — control packet (right panel)
@@ -369,7 +395,13 @@
        ;; ── Left: iteration list ────────────────────────────
        [:div.wg-list
         [:div.wg-pane-header "Iterations"]
-        (iteration-list run-id evidence-list)]
+        [:div#iteration-list
+         ;; placeholder — SSE replaces this with the actual running row
+         (if (= :running state)
+           (iteration-running-row run-id (inc iteration))
+           [:div#iter-row-running])
+         (for [ev (reverse evidence-list)]
+           (iteration-row run-id ev))]]
 
        ;; ── Centre: iteration detail ────────────────────────
        [:div.wg-detail-col
@@ -390,29 +422,30 @@
 ;; DAG full shell page
 ;; ──────────────────────────────────────────
 
-(defn shell-page [run-id graph-id]
-  [:html
-   [:head
-    [:meta {:charset "utf-8"}]
-    [:title (str "Morpheus · " graph-id)]
-    [:script {:src "https://unpkg.com/htmx.org@1.9.12"}]
-    [:script {:src "https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"}]
-    [:link {:rel "stylesheet" :href "/style.css"}]]
-   [:body
-    [:div.shell
-     [:div.topbar
-      [:span.topbar-title (str graph-id)]
-      [:span.topbar-sub   (str "run #" run-id)]
-      [:span#run-status.status-pill.status-running "Running"]]
+(defn shell-page [run-id summary]
+  (let [nodes     (or (:nodes summary) [])
+        state-map (or (:state-map summary) {})]
+    [:html
+     [:head
+      [:meta {:charset "utf-8"}]
+      [:title (str "Morpheus · run #" run-id)]
+      [:script {:src "https://unpkg.com/htmx.org@1.9.12"}]
+      [:script {:src "https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"}]
+      [:link {:rel "stylesheet" :href "/style.css"}]]
+     [:body
+      [:div.shell
+       [:div.topbar
+        [:span.topbar-title (str "run #" run-id)]
+        [:span#run-status.status-pill.status-running "Running"]]
 
-     [:div.graph-pane
-      {:hx-ext "sse" :sse-connect (str "/runs/" run-id "/stream")}
-      [:div {:id "sse-sink" :sse-swap "node-update" :style "display:none"}]
-      [:div#dag-placeholder "Loading graph…"]]
+       [:div.graph-pane
+        {:hx-ext "sse" :sse-connect (str "/runs/" run-id "/stream")}
+        [:div {:id "sse-sink" :sse-swap "node-update" :style "display:none"}]
+        (dag-canvas nodes state-map)]
 
-     [:div.side-pane
-      [:div.side-header "Execution log"]
-      [:div#side-body.side-body
-       [:div#node-output.node-output]
-       [:div#log-lines]]
-      [:div#checkpoint-panel.checkpoint-panel]]]]])
+       [:div.side-pane
+        [:div.side-header "Execution log"]
+        [:div#side-body.side-body
+         [:div#node-output.node-output]
+         [:div#log-lines]]
+        [:div#checkpoint-panel.checkpoint-panel]]]]]))

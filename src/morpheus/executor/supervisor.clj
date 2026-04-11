@@ -53,14 +53,24 @@ control packet that directs the next iteration.
 ## Output format
 Respond with a JSON object and nothing else:
 {
-  \"objective\":     \"<one sentence: what to ship this iteration>\",
-  \"constraints\":   [\"<hard limit>\", ...],
-  \"success_check\": \"<shell command that must exit 0>\",
-  \"anti_goals\":    [\"<thing to avoid>\", ...],
-  \"brief\":         \"<2-3 sentences: what happened and why we're pivoting>\"
+  \"objective\":   \"<one sentence: what to ship this iteration>\",
+  \"constraints\": [\"<hard limit>\", ...],
+  \"anti_goals\":  [\"<thing to avoid>\", ...],
+  \"brief\":       \"<2-3 sentences: what happened and why we're pivoting>\",
+  \"plan\":        [\"<step 1>\", \"<step 2>\", ...]
 }
 
-Constraints and anti_goals must each have at most 3 items.")
+Constraints and anti_goals must each have at most 3 items.
+
+Do NOT include a success_check field. The success check is fixed by the product
+owner and cannot be changed.
+
+The \"plan\" field is optional. Include it (3-5 concrete action steps) only when
+the executor needs explicit direction: on the first iteration, after a failure,
+or when pivoting to a new phase. Omit it when the executor is already on a clear
+path and just needs to continue. When included, steps should be specific enough
+to execute directly (e.g. \"Run npm create vite@latest . -- --template react-ts\",
+not \"set up the project\").")
 
 (defn- format-control-packet [packet]
   (str/join "\n"
@@ -115,11 +125,12 @@ Constraints and anti_goals must each have at most 3 items.")
 (defn- normalise
   "Converts raw JSON-parsed map (keyword keys, underscore names) to internal shape."
   [raw]
-  {:objective     (or (:objective raw) "Continue toward the product goal.")
-   :constraints   (vec (or (:constraints raw) []))
-   :success-check (or (:success_check raw) (:success-check raw) "echo ok")
-   :anti-goals    (vec (or (:anti_goals raw) (:anti-goals raw) []))
-   :brief         (or (:brief raw) "")})
+  (cond-> {:objective     (or (:objective raw) "Continue toward the product goal.")
+           :constraints   (vec (or (:constraints raw) []))
+           :success-check (or (:success_check raw) (:success-check raw) "echo ok")
+           :anti-goals    (vec (or (:anti_goals raw) (:anti-goals raw) []))
+           :brief         (or (:brief raw) "")}
+    (seq (:plan raw)) (assoc :plan (vec (:plan raw)))))
 
 ;; ──────────────────────────────────────────
 ;; Public API

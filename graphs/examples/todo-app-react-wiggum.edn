@@ -51,6 +51,6 @@
  :fallback-delay-ms 20000
 
  :model-config
- {:model-id    "claude-sonnet-4-6"
+ {:model-id    "claude-haiku-4-5-20251001"
   :temperature 0.2
   :max-tokens  8192}}

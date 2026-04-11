@@ -20,7 +20,9 @@
      :max-iterations optional  — hard cap (default 20)
      :step-once?     optional  — start in step-once mode (default false)
      :timeout-ms     optional  — per-iteration CC timeout (default 300000)
-     :model-config   optional  — LLM overrides for the supervisor"
+     :model-config          optional  — LLM model for both executor and supervisor
+     :executor-model-config optional  — overrides :model-config for the executor only
+     :supervisor-model-config optional — overrides :model-config for the supervisor only"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
    [clojure.java.shell          :as shell]
@@ -44,6 +46,7 @@
      :work-dir       (atom nil)          ; set once the temp dir is created
      :control-packet (atom nil)          ; current control packet
      :iterations     (atom [])           ; vec of evidence maps (one per iteration)
+     :live-output    (atom "")          ; accumulated stdout for the running iteration
      :event-log      (atom [])           ; append-only log of all events
      :state          (atom :pending)     ; :pending :running :paused :done :aborted :error
      :control        (atom {:step-once? (boolean (:step-once? run-config false))})
@@ -116,9 +119,13 @@
   "Generates a CLAUDE.md for the executor from the current control packet."
   [packet]
   (let [constraints (:constraints packet)
-        anti-goals  (:anti-goals  packet)]
+        anti-goals  (:anti-goals  packet)
+        plan        (:plan packet)]
     (str "# Objective\n\n"
          (:objective packet)
+         (when (seq plan)
+           (str "\n\n## This iteration\n\n"
+                (clojure.string/join "\n" (map-indexed #(str (inc %1) ". " %2) plan))))
          (when (seq constraints)
            (str "\n\n## Constraints\n\n"
                 (clojure.string/join "\n" (map #(str "- " %) constraints))))
@@ -146,9 +153,11 @@
   [run work-dir iteration control-packet]
   (let [config        (:config run)
         timeout-ms    (:timeout-ms config 300000)
-        primary-model (get-in config [:model-config :model-id])
+        primary-model (or (get-in config [:executor-model-config :model-id])
+                          (get-in config [:model-config :model-id]))
         success-check (:success-check control-packet)]
     ;; write scoped CLAUDE.md for this iteration
+    (reset! (:live-output run) "")
     (cc/write-claude-md! work-dir (control-packet->claude-md control-packet))
     (emit! run {:type           :iteration-started
                 :iteration      iteration
@@ -160,7 +169,12 @@
                          {:work-dir   work-dir
                           :prompt     (:objective control-packet)
                           :timeout-ms timeout-ms
-                          :model      primary-model}
+                          :model      primary-model
+                          :on-output  (fn [line]
+                                        (swap! (:live-output run) str line "\n")
+                                        (emit! run {:type      :output-line
+                                                    :iteration iteration
+                                                    :line      line}))}
                          config)
           verification (when success-check
                          (run-verification! work-dir success-check))
@@ -195,8 +209,18 @@
           (log/info "Copying project into work dir" {:src pd :dst work-dir})
           (shell/sh "sh" "-c" (str "cp -r " pd "/* " work-dir "/") :dir work-dir))
 
-        (loop [iteration      1
-               control-packet (supervisor/bootstrap run-config)]
+        (let [locked-check (:success-check run-config "echo ok")
+              pin-check    #(assoc % :success-check locked-check)
+              seed-packet  (supervisor/bootstrap run-config)
+              first-packet (pin-check
+                             (supervisor/review
+                               (:objective run-config)
+                               seed-packet
+                               []
+                               (or (:supervisor-model-config run-config)
+                                   (:model-config run-config {}))))]
+          (loop [iteration      1
+                 control-packet first-packet]
           (reset! (:control-packet run) control-packet)
 
           (let [max-iter (or (:max-iterations run-config) 20)]
@@ -212,56 +236,61 @@
               (emit! run {:type :run-aborted :run-id run-id})
 
               :else
-              (let [ev (run-iteration! run work-dir iteration control-packet)]
-                (swap! (:iterations run) conj ev)
+              (let [ev (run-iteration! run work-dir iteration control-packet)
+                    _  (swap! (:iterations run) conj ev)
+                    verified?      (verification-passed? (:verification ev))
+                    checkpoint-every (:checkpoint-every run-config)
+                    milestone-hit?   (and checkpoint-every
+                                          (zero? (mod iteration checkpoint-every)))]
 
-                (if (verification-passed? (:verification ev))
-                  ;; verification passed — we're done
+                (if (or (:step-once? @(:control run)) milestone-hit?)
+
+                  ;; ── pause for human review (always when step-once, even if verified) ──
                   (do
-                    (set-state! run :done)
-                    (emit! run {:type :run-complete :reason :verified :iteration iteration}))
+                    (set-state! run :paused)
+                    (emit! run {:type       :run-paused
+                                :iteration  iteration
+                                :verified?  verified?
+                                :milestone? milestone-hit?})
+                    (let [action (<! (:resume-ch run))]
+                      (set-state! run :running)
+                      (case (:action action)
+                        :abort
+                        (do (set-state! run :aborted)
+                            (emit! run {:type :run-aborted}))
 
-                  ;; not done yet — pause or auto-continue
-                  (let [checkpoint-every (:checkpoint-every run-config)
-                        milestone-hit?   (and checkpoint-every
-                                              (zero? (mod iteration checkpoint-every)))]
-                    (if (or (:step-once? @(:control run)) milestone-hit?)
+                        :retry
+                        (recur iteration control-packet)
 
-                      ;; ── pause for human review ──
-                      (do
-                        (set-state! run :paused)
-                        (emit! run {:type       :run-paused
-                                    :iteration  iteration
-                                    :milestone? milestone-hit?})
-                        (let [action (<! (:resume-ch run))]
-                          (set-state! run :running)
-                          (case (:action action)
-                            :abort
-                            (do (set-state! run :aborted)
-                                (emit! run {:type :run-aborted}))
+                        :retry-with-overrides
+                        (recur iteration (merge control-packet (:overrides action)))
 
-                            :retry
-                            (recur iteration control-packet)
-
-                            :retry-with-overrides
-                            (recur iteration (merge control-packet (:overrides action)))
-
-                            ;; :step — advance; supervisor incorporates human feedback
-                            (let [feedback    (when (seq (:feedback action)) (:feedback action))
-                                  next-packet (supervisor/review
+                        ;; :step — if verified and human steps, we're done; otherwise supervisor
+                        (if verified?
+                          (do (set-state! run :done)
+                              (emit! run {:type :run-complete :reason :verified :iteration iteration}))
+                          (let [feedback    (when (seq (:feedback action)) (:feedback action))
+                                next-packet (pin-check
+                                              (supervisor/review
                                                 (:objective run-config)
                                                 control-packet
                                                 (recent-evidence (:iterations run) 3)
-                                                (:model-config run-config {})
-                                                feedback)]
-                              (recur (inc iteration) next-packet)))))
+                                                (or (:supervisor-model-config run-config) (:model-config run-config {}))
+                                                feedback))]
+                            (recur (inc iteration) next-packet))))))
 
-                      ;; ── auto-continue ──
-                      (let [next-packet (supervisor/review
+                  (if verified?
+                    ;; auto-mode + verified — done
+                    (do (set-state! run :done)
+                        (emit! run {:type :run-complete :reason :verified :iteration iteration}))
+
+                    ;; ── auto-continue ──
+                    (let [next-packet (pin-check
+                                        (supervisor/review
                                           (:objective run-config)
                                           control-packet
                                           (recent-evidence (:iterations run) 3)
-                                          (:model-config run-config {}))]
+                                          (or (:supervisor-model-config run-config) (:model-config run-config {}))))]
                         (recur (inc iteration) next-packet)))))))))
         ))
     run))
