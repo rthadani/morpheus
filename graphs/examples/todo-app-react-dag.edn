@@ -1,0 +1,154 @@
+;; Todo application (React + TypeScript) — DAG with milestone checkpoints
+;;
+;; Milestone 1: Scaffold + implement + tests
+;; Checkpoint 1: Human reviews before proceeding
+;; Milestone 2: Polish based on feedback + final verification
+;; Checkpoint 2: Final approval before shipping
+;;
+;; Usage:
+;;   (def graph (edn/read-string (slurp "graphs/examples/todo-app-react-dag.edn")))
+;;   (def run   (engine/execute! 1 graph {:graph/params {:project-dir "/tmp/todo-react"}}))
+;;
+;; Or from the CLI:
+;;   clj -M:run graphs/examples/todo-app-react-dag.edn --project-dir ./my-todo-app
+
+{:graph/id      :todo-app-react-dag
+ :graph/version "1.0.0"
+
+ :graph/params
+ {:project-dir nil}
+
+ :graph/default-model
+ {:model-id    "claude-haiku-4-5-20251001"
+  :temperature 0.2
+  :max-tokens  8192}
+
+ :graph/nodes
+ [;; ── Milestone 1a: Scaffold ────────────────────────────────────────────────
+  {:id         :scaffold
+   :type       :task
+   :depends-on []
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: scaffold
+## Your job
+Bootstrap a React + TypeScript + Vite todo app project.
+
+Steps:
+1. Run `npm create vite@latest . -- --template react-ts` in the project directory
+2. Run `npm install` to install dependencies
+3. Run `npm install -D vitest @vitest/ui jsdom @testing-library/react @testing-library/jest-dom @testing-library/user-event` to add test deps
+4. Add a `test` script to package.json: `\"test\": \"vitest run\"`
+5. Add vitest config to vite.config.ts:
+   ```
+   test: { globals: true, environment: 'jsdom', setupFiles: ['./src/setupTests.ts'] }
+   ```
+6. Create `src/setupTests.ts` with: `import '@testing-library/jest-dom'`
+
+## Done when
+`npm install` exits 0 and `src/setupTests.ts` exists."
+   :prompt     "Scaffold a React+TypeScript+Vite todo app at {{project-dir}}."
+   :done-check "test -f src/setupTests.ts"
+   :output-key :scaffold/output}
+
+  ;; ── Milestone 1b: Implement ───────────────────────────────────────────────
+  {:id         :implement
+   :type       :task
+   :depends-on [:scaffold]
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: implement
+## Your job
+Implement the todo app. Keep all logic in a single custom hook.
+
+Files to write:
+- `src/hooks/useTodos.ts` — all todo state + localStorage persistence
+  - state: todo list (id, title, done, createdAt)
+  - actions: addTodo, toggleTodo, deleteTodo
+  - filter: 'all' | 'active' | 'completed'
+  - persist to localStorage on every change, hydrate on mount
+- `src/components/TodoApp.tsx` — main component using useTodos
+- `src/components/TodoItem.tsx` — single todo row
+- `src/App.tsx` — renders <TodoApp />
+- `src/App.css` and `src/index.css` — plain CSS, no frameworks
+
+## Constraints
+- React 18 with useState only — no Redux, no Context API, no Zustand
+- Plain CSS modules or plain CSS — no Tailwind
+- No shared utility files or helpers used only once
+
+## Done when
+`npm run build` exits 0."
+   :prompt     "Implement the React todo app at {{project-dir}}."
+   :done-check "npm run build"
+   :output-key :implement/output}
+
+  ;; ── Milestone 1c: Tests ───────────────────────────────────────────────────
+  {:id         :write-tests
+   :type       :task
+   :depends-on [:implement]
+   :inputs     {:project-dir [:graph/params :project-dir]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: write-tests
+## Your job
+Write a Vitest + React Testing Library test suite.
+
+Files to write:
+- `src/hooks/useTodos.test.ts` — unit tests for useTodos hook
+  - adding a todo, toggling done, deleting, filter logic, localStorage roundtrip
+- `src/components/TodoApp.test.tsx` — integration tests
+  - add a todo via the form, mark as done, delete, filter tabs
+
+## Constraints
+- Use vitest and @testing-library/react only
+- At least 5 assertions total
+- Reset localStorage in beforeEach to avoid test bleed
+
+## Done when
+`npm test -- --run` exits 0 with no failures."
+   :prompt     "Write tests for the React todo app at {{project-dir}}."
+   :done-check "npm test -- --run"
+   :output-key :write-tests/output}
+
+  ;; ── Checkpoint 1: Human reviews milestone 1 ──────────────────────────────
+  {:id         :review-milestone-1
+   :type       :checkpoint
+   :depends-on [:write-tests]
+   :present    [:implement/output :write-tests/output]
+   :actions    [:approve :revise :abort]
+   :on-revise  {:re-run     :write-tests
+                :inject-key :milestone-1/feedback}
+   :output-key :milestone-1/decision}
+
+  ;; ── Milestone 2: Polish ───────────────────────────────────────────────────
+  {:id         :polish
+   :type       :task
+   :depends-on [:review-milestone-1]
+   :inputs     {:project-dir [:graph/params :project-dir]
+                :feedback    [:milestone-1/feedback]}
+   :project-dir [:graph/params :project-dir]
+   :claude-md  "# Task: polish
+## Your job
+Apply reviewer feedback and harden the app.
+
+If feedback was provided, address it first. Then:
+- Ensure all edge cases are handled (empty input, duplicate titles)
+- Add aria-labels and basic accessibility attributes
+- Confirm the filter tabs work correctly (all/active/completed counts)
+- Make sure the page is usable on a narrow viewport (min 320px)
+
+## Done when
+`npm test -- --run` exits 0 and `npm run build` exits 0."
+   :prompt     "Polish the React todo app at {{project-dir}} based on feedback: {{feedback}}"
+   :done-check "npm test -- --run && npm run build"
+   :output-key :polish/output}
+
+  ;; ── Checkpoint 2: Final approval ─────────────────────────────────────────
+  {:id         :review-final
+   :type       :checkpoint
+   :depends-on [:polish]
+   :present    [:polish/output :write-tests/output]
+   :actions    [:approve :revise :abort]
+   :on-revise  {:re-run     :polish
+                :inject-key :milestone-2/feedback}
+   :output-key :milestone-2/decision}]}
