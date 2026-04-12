@@ -77,7 +77,7 @@
  :project-dir nil
 
  :success-check
- "podman-compose up --build -d && sleep 8 && curl -sf http://localhost:3001/api/health && curl -sf http://localhost:3001/ | grep -q '<div id=\"root\"' && podman-compose down"
+ "podman-compose up --build -d && sleep 8 && curl -sf http://localhost:3001/api/health && curl -sf http://localhost:3001/ | grep -q '<div id=\"root\"' && podman-compose down && test -f README.md && test -f CLAUDE.md"
 
  :constraints
  ["Work phase by phase: complete and test the frontend before starting the backend,
@@ -94,13 +94,21 @@
   "Do not create shared utility files or helper modules used only in one place"
   "Do not leave TODO comments, unimplemented stubs, or placeholder routes"]
 
- :max-iterations  20
- :step-once?      false
+ :max-iterations      20
+ :step-once?          false
+ :generate-claude-md? true
 
  :fallback-model    "claude-haiku-4-5-20251001"
  :fallback-delay-ms 20000
 
- :model-config
+ ;; Executor uses Haiku (fast, cheap) — builds the code
+ :executor-model-config
  {:model-id    "claude-haiku-4-5-20251001"
   :temperature 0.2
-  :max-tokens  8192}}
+  :max-tokens  8192}
+
+ ;; Supervisor uses Sonnet — must reason across phases and steer correctly
+ :supervisor-model-config
+ {:model-id "claude-sonnet-4-6"
+  :temperature 0.2
+  :max-tokens  4096}}

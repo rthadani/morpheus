@@ -69,8 +69,11 @@
      :provider — provider string, defaults to \"anthropic\"
 
    verification is optional: {:exit <n> :output <s>} from running the
-   success-check command after the CC process exits."
-  [iteration cc-result verification]
+   success-check command after the CC process exits.
+
+   dir-tree is optional: string output of find in the work-dir, used by
+   the supervisor to understand what was built without needing tool access."
+  [iteration cc-result verification & [top-level dir-tree expected-check]]
   (let [before  (:before-snapshot cc-result {})
         after   (:after-snapshot  cc-result {})
         changes (classify-changes before after)]
@@ -91,7 +94,10 @@
        :slop-signals  (slop-signals changes)
        :approx-tokens {:in  (int (/ in-chars 4))
                        :out (int (/ out-chars 4))}
-       :cost-usd      (:cost-usd cc-result)})))
+       :cost-usd       (:cost-usd cc-result)
+       :top-level      top-level
+       :dir-tree       dir-tree
+       :expected-check expected-check})))
 
 ;; ──────────────────────────────────────────
 ;; Human-readable summary (for supervisor prompt)
@@ -101,24 +107,34 @@
   "Returns a compact multi-line string describing the evidence.
    Used as part of the supervisor's input prompt."
   [{:keys [iteration duration-ms files-written files-edited
-           exit-code verification slop-signals]}]
+           exit-code verification slop-signals top-level dir-tree expected-check]}]
   (let [secs     (int (/ (or duration-ms 0) 1000))
         ver-str  (if verification
                    (str "exit=" (:exit verification)
                         (when (pos? (:exit verification 0))
                           (str " — " (some-> (:output verification)
-                                             (subs 0 (min 120 (count (:output verification))))))))
+                                             (subs 0 (min 600 (count (:output verification))))))))
                    "not run")]
     (str/join "\n"
               [(str "Iteration " iteration " (" secs "s, exit=" exit-code ")")
-               (str "  Files written : " (count files-written)
-                    (when (seq files-written)
-                      (str " — " (str/join ", " (take 6 files-written)))))
-               (str "  Files edited  : " (count files-edited)
-                    (when (seq files-edited)
-                      (str " — " (str/join ", " (take 6 files-edited)))))
+               (when (seq top-level)
+                 (str "  Top-level     : " top-level))
+               (str "  Files written : " (count files-written))
+               (str "  Files edited  : " (count files-edited))
                (str "  Verification  : " ver-str)
                (str "  Slop signals  : "
                     "new-ratio=" (:new-file-ratio slop-signals) "% "
                     "helpers=" (:helpers-added? slop-signals) " "
-                    "only-new=" (:only-new-files? slop-signals))])))
+                    "only-new=" (:only-new-files? slop-signals))
+               (when expected-check
+                 ;; These paths were declared by the supervisor in the previous control
+                 ;; packet — the LLM specified what it expected this iteration to produce.
+                 (str "  Declared targets (supervisor's own expected_files from prior packet):"
+                      (when (seq (:present expected-check))
+                        (str "\n    ✓ " (str/join "\n    ✓ " (:present expected-check))))
+                      (when (seq (:missing expected-check))
+                        (str "\n    ✗ " (str/join "\n    ✗ " (:missing expected-check))))))
+               (when (seq dir-tree)
+                 (str "  Directory tree :\n"
+                      (str/join "\n" (map #(str "    " %)
+                                         (str/split-lines dir-tree)))))])))

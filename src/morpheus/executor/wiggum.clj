@@ -22,9 +22,13 @@
      :timeout-ms     optional  — per-iteration CC timeout (default 300000)
      :model-config          optional  — LLM model for both executor and supervisor
      :executor-model-config optional  — overrides :model-config for the executor only
-     :supervisor-model-config optional — overrides :model-config for the supervisor only"
+     :supervisor-model-config optional — overrides :model-config for the supervisor only
+     :generate-claude-md? optional  — when true, generates a project-level CLAUDE.md
+                                       after the run verifies successfully, overwriting
+                                       the executor task-brief left in the work-dir"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
+   [clojure.java.io             :as io]
    [clojure.java.shell          :as shell]
    [clojure.string              :as str]
    [taoensso.timbre             :as log]
@@ -78,6 +82,61 @@
     {:exit   (:exit result)
      :output (str (:out result) (:err result))}))
 
+(defn- top-level-summary
+  "Returns a one-line summary of top-level entries in work-dir.
+   e.g. \"kanban-app/ server/ Dockerfile docker-compose.yml\"
+   Gives the supervisor an immediate picture of which phases exist."
+  [work-dir]
+  (let [f (io/file work-dir)]
+    (->> (.listFiles f)
+         (remove nil?)
+         (remove #(= "CLAUDE.md" (.getName %)))
+         (map #(str (.getName %) (if (.isDirectory %) "/" "")))
+         sort
+         (str/join "  "))))
+
+(defn- check-expected-files
+  "Checks which paths from the control packet's :expected-files exist in work-dir.
+   Directories (trailing /) are checked with .isDirectory, files with .exists.
+   Returns {:present [...] :missing [...]}."
+  [work-dir expected-files]
+  (let [base (io/file work-dir)]
+    (group-by (fn [path]
+                (let [f (io/file base path)]
+                  (if (str/ends-with? path "/")
+                    (if (.isDirectory f) :present :missing)
+                    (if (.exists f)      :present :missing))))
+              expected-files)))
+
+(defn- dir-tree
+  "Returns a file listing of work-dir for the supervisor.
+   Searches for .gitignore files up to 2 levels deep (handles scaffolded subdirs
+   like kanban-app/.gitignore). Caps output at 300 lines to keep prompts bounded."
+  [work-dir]
+  (let [;; find all .gitignore files within 2 levels
+        gi-result (shell/sh "find" "." "-maxdepth" "2" "-name" ".gitignore"
+                            :dir work-dir)
+        gi-paths  (when (zero? (:exit gi-result))
+                    (remove str/blank? (str/split-lines (:out gi-result))))
+        ;; parse patterns from every .gitignore found
+        ignores   (->> gi-paths
+                       (mapcat (fn [rel-path]
+                                 (let [f (io/file work-dir (str/replace rel-path #"^\.\/" ""))]
+                                   (when (.exists f)
+                                     (->> (str/split-lines (slurp f))
+                                          (remove #(str/starts-with? % "#"))
+                                          (remove #(str/starts-with? % "!"))
+                                          (remove str/blank?)
+                                          (map str/trim)
+                                          (map #(str/replace % #"^/" ""))
+                                          (map #(str/replace % #"/$" "")))))))
+                       distinct)
+        excludes  (mapcat #(vector "-not" "-path" (str "*/" % "/*")) ignores)
+        args      (concat ["find" "." "-type" "f"] excludes)
+        lines     (str/split-lines
+                    (str/trim (:out (apply shell/sh (concat args [:dir work-dir])))))]
+    (str/join "\n" (take 300 lines))))
+
 (defn- verification-passed? [verification]
   (and (some? verification) (zero? (:exit verification))))
 
@@ -115,32 +174,93 @@
           (log/warn "Rate limit detected but no :fallback-model configured")
           result)))))
 
+(defn- strip-path-prefix
+  "Removes occurrences of `prefix/` from text so plan steps like
+   'create kanban-full/src/app.ts' become 'create src/app.ts'.
+   No-op when prefix is nil or blank."
+  [text prefix]
+  (if (seq prefix)
+    (str/replace text
+                 (re-pattern (str "(?i)\\b" (java.util.regex.Pattern/quote prefix) "/"))
+                 "")
+    text))
+
 (defn- control-packet->claude-md
-  "Generates a CLAUDE.md for the executor from the current control packet."
-  [packet]
-  (let [constraints (:constraints packet)
-        anti-goals  (:anti-goals  packet)
-        plan        (:plan packet)]
-    (str "# Objective\n\n"
-         (:objective packet)
-         (when (seq plan)
-           (str "\n\n## This iteration\n\n"
-                (clojure.string/join "\n" (map-indexed #(str (inc %1) ". " %2) plan))))
-         (when (seq constraints)
-           (str "\n\n## Constraints\n\n"
-                (clojure.string/join "\n" (map #(str "- " %) constraints))))
-         (when-let [sc (:success-check packet)]
-           (str "\n\n## Done when\n\n"
-                "Running `" sc "` exits 0."))
-         (when (seq anti-goals)
-           (str "\n\n## Do not\n\n"
-                (clojure.string/join "\n" (map #(str "- " %) anti-goals))))
-         "\n")))
+  "Generates a CLAUDE.md for the executor from the current control packet.
+
+   work-dir-contents   — one-line string from top-level-summary, injected so the
+                         executor sees exactly what exists before touching any files.
+   path-prefix-to-strip — project dir basename (e.g. \"kanban-full\"); any plan step
+                          that mentions this as a path prefix is rewritten in code
+                          before the LLM ever sees it."
+  ([packet] (control-packet->claude-md packet nil nil))
+  ([packet work-dir-contents] (control-packet->claude-md packet work-dir-contents nil))
+  ([packet work-dir-contents path-prefix-to-strip]
+   (let [constraints (:constraints packet)
+         anti-goals  (:anti-goals  packet)
+         ;; strip wrong path prefix from plan steps *in code* — no LLM needed
+         plan        (when (seq (:plan packet))
+                       (map #(strip-path-prefix % path-prefix-to-strip) (:plan packet)))]
+     (str "> **Working directory**: you are already in the project root.\n"
+          (if (seq work-dir-contents)
+            (str "> **Current top-level contents**: " work-dir-contents "\n"
+                 "> All file paths must be relative to this directory."
+                 " Do NOT prefix them with a project or directory name.\n\n")
+            "> All source files are here. Do not look for a subdirectory matching the project name.\n\n")
+          "# Objective\n\n"
+          (:objective packet)
+          (when (seq plan)
+            (str "\n\n## This iteration\n\n"
+                 (str/join "\n" (map-indexed #(str (inc %1) ". " %2) plan))))
+          (when (seq constraints)
+            (str "\n\n## Constraints\n\n"
+                 (str/join "\n" (map #(str "- " %) constraints))))
+          (when-let [sc (:success-check packet)]
+            (str "\n\n## Done when\n\n"
+                 "Running `" sc "` exits 0."))
+          (when (seq anti-goals)
+            (str "\n\n## Do not\n\n"
+                 (str/join "\n" (map #(str "- " %) anti-goals))))
+          "\n"))))
 
 (defn- recent-evidence
   "Returns the last N evidence maps for the supervisor."
   [iterations-atom n]
   (vec (take-last n @iterations-atom)))
+
+;; ──────────────────────────────────────────
+;; Post-run CLAUDE.md generation
+;; ──────────────────────────────────────────
+
+(defn- generate-project-claude-md!
+  "Called once after a successful run when :generate-claude-md? is true.
+   Overwrites the executor task-brief CLAUDE.md with a real project CLAUDE.md
+   generated by the supervisor LLM from the final state of the work-dir."
+  [run work-dir]
+  (let [config    (:config run)
+        objective (:objective config)
+        top       (top-level-summary work-dir)
+        tree      (dir-tree work-dir)
+        model-cfg (merge {:model-id    (or (get-in config [:supervisor-model-config :model-id])
+                                           "claude-haiku-4-5-20251001")
+                          :max-tokens  4096
+                          :temperature 0.2}
+                         (select-keys (or (:supervisor-model-config config) {})
+                                      [:provider :base-url]))
+        prompt    (str/join "\n\n"
+                    ["You have just finished building a software project. Write a CLAUDE.md for it."
+                     (str "## Original goal\n" objective)
+                     (str "## Top-level structure\n" top)
+                     (str "## Project files\n" tree)
+                     (str "## What to include in CLAUDE.md\n"
+                          "- What the project does (1-2 sentences)\n"
+                          "- How to build, run, and test it (exact commands)\n"
+                          "- Key architectural decisions and constraints\n"
+                          "- Any agents, skills, or tools needed to maintain it\n\n"
+                          "Write only the CLAUDE.md content. No preamble.")])
+        content   (llm/complete model-cfg prompt)]
+    (log/info "Writing project CLAUDE.md" {:work-dir work-dir :chars (count content)})
+    (spit (str work-dir "/CLAUDE.md") content)))
 
 ;; ──────────────────────────────────────────
 ;; Core iteration
@@ -155,10 +275,17 @@
         timeout-ms    (:timeout-ms config 300000)
         primary-model (or (get-in config [:executor-model-config :model-id])
                           (get-in config [:model-config :model-id]))
-        success-check (:success-check control-packet)]
+        success-check (:success-check control-packet)
+        ;; snapshot actual work-dir contents BEFORE running CC — injected into CLAUDE.md
+        ;; so the executor sees exactly what exists and won't fabricate paths.
+        current-top   (top-level-summary work-dir)
+        ;; basename of the original project-dir, used to strip wrong path prefixes
+        ;; from plan steps produced by the supervisor (e.g. "kanban-full/src/" → "src/")
+        proj-prefix   (some-> (get-in config [:project-dir])
+                               io/file .getName)]
     ;; write scoped CLAUDE.md for this iteration
     (reset! (:live-output run) "")
-    (cc/write-claude-md! work-dir (control-packet->claude-md control-packet))
+    (cc/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix))
     (emit! run {:type           :iteration-started
                 :iteration      iteration
                 :work-dir       work-dir
@@ -176,9 +303,13 @@
                                                     :iteration iteration
                                                     :line      line}))}
                          config)
-          verification (when success-check
-                         (run-verification! work-dir success-check))
-          ev           (evidence/build iteration cc-result verification)]
+          verification     (when success-check
+                             (run-verification! work-dir success-check))
+          top-level        (top-level-summary work-dir)
+          tree             (dir-tree work-dir)
+          expected-check   (when (seq (:expected-files control-packet))
+                             (check-expected-files work-dir (:expected-files control-packet)))
+          ev               (evidence/build iteration cc-result verification top-level tree expected-check)]
       (emit! run {:type      :iteration-complete
                   :iteration iteration
                   :evidence  ev})
@@ -199,6 +330,7 @@
     (go
       (set-state! run :running)
       (emit! run {:type :run-started :run-id run-id :objective (:objective run-config)})
+      (try
 
       ;; create a persistent work dir for the whole run
       (let [work-dir (cc/make-work-dir! run-id "wiggum")]
@@ -209,7 +341,14 @@
           (log/info "Copying project into work dir" {:src pd :dst work-dir})
           (shell/sh "sh" "-c" (str "cp -r " pd "/* " work-dir "/") :dir work-dir))
 
-        (let [locked-check (:success-check run-config "echo ok")
+        ;; snapshot the work-dir state after project copy — tells the supervisor
+        ;; what was already present before any iteration ran.
+        ;; Only top-level dirs/files: individual file paths would let the supervisor
+        ;; hallucinate subdirectory names (e.g. the project-dir name) as path prefixes.
+        (let [initial-state (let [tl (top-level-summary work-dir)]
+                              (when (seq tl)
+                                (str "Top-level contents of project root: " tl)))
+              locked-check (:success-check run-config "echo ok")
               pin-check    #(assoc % :success-check locked-check)
               seed-packet  (supervisor/bootstrap run-config)
               first-packet (pin-check
@@ -218,7 +357,9 @@
                                seed-packet
                                []
                                (or (:supervisor-model-config run-config)
-                                   (:model-config run-config {}))))]
+                                   (:model-config run-config {}))
+                               nil
+                               initial-state))]
           (loop [iteration      1
                  control-packet first-packet]
           (reset! (:control-packet run) control-packet)
@@ -268,6 +409,8 @@
                         ;; :step — if verified and human steps, we're done; otherwise supervisor
                         (if verified?
                           (do (set-state! run :done)
+                              (when (:generate-claude-md? run-config)
+                                (generate-project-claude-md! run work-dir))
                               (emit! run {:type :run-complete :reason :verified :iteration iteration}))
                           (let [feedback    (when (seq (:feedback action)) (:feedback action))
                                 next-packet (pin-check
@@ -276,12 +419,15 @@
                                                 control-packet
                                                 (recent-evidence (:iterations run) 3)
                                                 (or (:supervisor-model-config run-config) (:model-config run-config {}))
-                                                feedback))]
+                                                feedback
+                                                initial-state))]
                             (recur (inc iteration) next-packet))))))
 
                   (if verified?
                     ;; auto-mode + verified — done
                     (do (set-state! run :done)
+                        (when (:generate-claude-md? run-config)
+                          (generate-project-claude-md! run work-dir))
                         (emit! run {:type :run-complete :reason :verified :iteration iteration}))
 
                     ;; ── auto-continue ──
@@ -290,9 +436,15 @@
                                           (:objective run-config)
                                           control-packet
                                           (recent-evidence (:iterations run) 3)
-                                          (or (:supervisor-model-config run-config) (:model-config run-config {}))))]
+                                          (or (:supervisor-model-config run-config) (:model-config run-config {}))
+                                          nil
+                                          initial-state))]
                         (recur (inc iteration) next-packet)))))))))
-        ))
+        )
+      (catch Exception e
+        (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
+        (set-state! run :error)
+        (emit! run {:type :run-error :message (.getMessage e)}))))
     run))
 
 ;; ──────────────────────────────────────────

@@ -114,6 +114,9 @@
     :run-aborted
     (println "\n✗  Run aborted")
 
+    :run-error
+    (println (str "\n💥 Run crashed — " (:message event)))
+
     ;; suppress noisy low-level events
     (:state-change :control-changed) nil
 
@@ -173,6 +176,7 @@
               ;; Terminal events — stop looping and return result
               :run-complete :ok
               :run-aborted  :aborted
+              :run-error    :error
 
               ;; All other events — keep looping
               (recur)))
