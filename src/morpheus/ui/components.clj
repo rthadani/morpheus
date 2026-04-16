@@ -383,7 +383,8 @@
       [:div.shell
        [:div.topbar
         [:span.topbar-title (str "run #" run-id)]
-        [:span#run-status.status-pill.status-running "Running"]]
+        [:span#run-status.status-pill.status-running "running"]
+        (abort-button run-id)]
 
        [:div.graph-pane
         {:hx-ext "sse" :sse-connect (str "/runs/" run-id "/stream")}

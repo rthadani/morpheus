@@ -23,7 +23,9 @@
      :context        (atom (merge (:graph/context graph) initial-context))
      :state          (atom {})          ; node-id → :pending|:running|:done|:paused|:error
      :output-buffers (atom {})          ; node-id → accumulated stdout string (live)
-     :steer-buffer   (atom nil)          ; human guidance queued for next node
+     :steer-buffer   (atom nil)         ; human guidance queued for next node
+     :aborted?       (atom false)       ; set by abort! to stop the loop at next tick
+     :event-log      (atom [])          ; append-only; replayed to SSE clients that connect late
      :event-ch       event-ch
      :event-mult     (async/mult event-ch) ; created once; SSE taps into this
      :resume-ch      (chan 1)              ; human action → executor (approve/revise/abort)
@@ -37,7 +39,8 @@
   (swap! state assoc node-id new-state)
   (put! event-ch {:type :state-change :node-id node-id :state new-state}))
 
-(defn- emit! [{:keys [event-ch]} event]
+(defn- emit! [{:keys [event-ch event-log]} event]
+  (when event-log (swap! event-log conj event))
   (put! event-ch event))
 
 ;; ──────────────────────────────────────────
@@ -95,6 +98,10 @@
               nodes    (topo/topo-sort (:graph/nodes graph))
               runnable (topo/runnable-nodes nodes @(:state run))]
           (cond
+            ;; abort requested externally
+            @(:aborted? run)
+            (emit! run {:type :run-aborted :run-id run-id})
+
             ;; nothing left to run and no paused nodes — done
             (and (empty? runnable)
                  (not (topo/paused? @(:state run)))
@@ -154,8 +161,15 @@
   [run action-map]
   (put! (:resume-ch run) action-map))
 
+(defn abort!
+  "Stops the engine loop after the current tick. Running nodes finish naturally."
+  [run]
+  (reset! (:aborted? run) true))
+
 (defn steer!
   "Queues human guidance to be injected into context before the next node runs.
    Overwrites any previously queued steer. Pass nil or blank to clear."
   [run text]
-  (reset! (:steer-buffer run) (when (seq text) text)))
+  (let [t (when (seq text) text)]
+    (reset! (:steer-buffer run) t)
+    (put! (:event-ch run) {:type :steer-queued :text (or t "")})))

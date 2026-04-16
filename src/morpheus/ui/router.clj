@@ -56,12 +56,15 @@
 (defn- dag-fragment [run run-id event]
   (case (:type event)
     :state-change
-    (let [nodes (-> @(:graph-atom run) :graph/nodes)
-          node  (first (filter #(= (:id %) (:node-id event)) nodes))]
+    (let [nodes     (-> @(:graph-atom run) :graph/nodes)
+          state-map @(:state run)
+          node      (first (filter #(= (:id %) (:node-id event)) nodes))]
       (when node
-        (str (h/html (ui/node-badge node (:state event) nil))
+        (str ;; Replace the whole canvas div — individual <g> OOB swaps fail because
+             ;; HTMX parses them as HTML unknowns inside #sse-sink (a div), not as SVG
+             (h/html (update (ui/dag-canvas nodes state-map)
+                             1 assoc :hx-swap-oob "outerHTML:#dag-canvas"))
              (when (= :running (:state event))
-               ;; OOB swap so the panel actually appears in the side pane
                (h/html [:div#node-output.node-output
                         {:hx-swap-oob "outerHTML:#node-output"}
                         [:div.detail-label [:span (str (name (:id node)) " running…")]]
@@ -69,12 +72,13 @@
 
     :checkpoint
     (str (h/html
-           (ui/checkpoint-panel run-id (:node-id event)
-                                (pr-str (:presented event)))))
+           (update (ui/checkpoint-panel run-id (:node-id event)
+                                        (pr-str (:presented event)))
+                   1 assoc :hx-swap-oob "outerHTML:#checkpoint-panel")))
 
     :node-complete
     (str (h/html
-           [:div {:id "log-tail" :hx-swap-oob "beforeend"}
+           [:div {:id "log-lines" :hx-swap-oob "beforeend"}
             (ui/log-line :ok (str "✓ " (name (:node-id event))
                                   " (" (:duration event) "ms)"))]))
 
@@ -93,6 +97,47 @@
            [:span {:id "live-output" :hx-swap-oob "beforeend"}
             (str (:line event) "\n")
             [:br]]))
+
+    :node-error
+    (str (h/html
+           [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+            (ui/log-line :err (str "✗ " (name (:node-id event))
+                                   " — " (:message event)))]))
+
+    :steer-queued
+    (let [text (:text event "")]
+      (str (h/html
+             [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+              (ui/log-line :info
+                           (str "↳ steer queued"
+                                (when (seq text)
+                                  (str ": " (if (> (count text) 60)
+                                              (str (subs text 0 60) "…")
+                                              text)))))])))
+
+    :run-complete
+    (str (h/html
+           [:span {:id "run-status" :hx-swap-oob "outerHTML:#run-status"
+                   :class "status-pill status-done"}
+            "done"])
+         (h/html
+           [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+            (ui/log-line :ok "✅ done")])
+         (h/html
+           (update (ui/abort-button run-id :disabled) 1
+                   assoc :hx-swap-oob "outerHTML:#abort-btn")))
+
+    :run-aborted
+    (str (h/html
+           [:span {:id "run-status" :hx-swap-oob "outerHTML:#run-status"
+                   :class "status-pill status-aborted"}
+            "aborted"])
+         (h/html
+           [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+            (ui/log-line :err "✗ aborted")])
+         (h/html
+           (update (ui/abort-button run-id :disabled) 1
+                   assoc :hx-swap-oob "outerHTML:#abort-btn")))
 
     nil))
 
@@ -267,11 +312,21 @@
                 rtype    (store/run-type run)
                 evt-name (if (= :wiggum rtype) "wiggum-update" "node-update")
                 mult     (:event-mult run)]
+            ;; Tap before replaying so we don't miss events between replay and live
             (async/tap mult tap-ch)
             (on-close ch (fn [_]
                            (log/debug "SSE client disconnected" run-id)
                            (async/untap mult tap-ch)
                            (async/close! tap-ch)))
+            ;; Replay past events for DAG runs — nodes may complete before the browser connects
+            (when (= :dag rtype)
+              (doseq [event @(:event-log run)]
+                (try
+                  (let [fragment (dag-fragment run run-id event)]
+                    (when fragment
+                      (send! ch (sse-event evt-name fragment))))
+                  (catch Exception e
+                    (log/error e "SSE replay error" {:event-type (:type event)})))))
             (go-loop []
               (when-let [event (<! tap-ch)]
                 (try
@@ -389,13 +444,15 @@
               :dag    (engine/steer! run text)))
           (html-resp (ui/steer-widget run-id)))))))
 
-(defn wiggum-abort-handler [run-store]
+(defn abort-handler [run-store]
   (fn [{:keys [path-params]}]
     (let [run-id (parse-long (:id path-params))
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
-        (do (wiggum/abort! run)
+        (do (case (store/run-type run)
+              :wiggum (wiggum/abort! run)
+              :dag    (engine/abort! run))
             (html-resp (ui/abort-button run-id :disabled)))))))
 
 (defn wiggum-step-handler [run-store]
@@ -469,7 +526,7 @@
          ["/stream"              {:get  (stream-handler run-store)}]
          ["/step"                {:post (wiggum-step-handler run-store)}]
          ["/auto"                {:post (wiggum-auto-handler run-store)}]
-         ["/abort"               {:post (wiggum-abort-handler run-store)}]
+         ["/abort"               {:post (abort-handler run-store)}]
          ["/resume"              {:post (wiggum-resume-handler run-store)}]
          ["/steer"               {:post (steer-handler run-store)}]
          ["/checkpoint/:node-id" {:post (checkpoint-handler run-store)}]
