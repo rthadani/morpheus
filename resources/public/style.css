@@ -116,7 +116,6 @@ body { background: var(--bg3); overflow: hidden; }
   border-bottom: 1px solid var(--amber);
 }
 .paused-banner-text { font-size: 12px; font-weight: 500; color: var(--amber); flex: 1; }
-.iter-controls { display: flex; gap: 8px; }
 
 /* left iteration list */
 .wg-list {

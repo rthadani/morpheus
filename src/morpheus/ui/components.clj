@@ -97,16 +97,6 @@
 ;; ──────────────────────────────────────────
 ;; DAG — node detail
 ;; ──────────────────────────────────────────
-
-(defn node-output-panel [node-id stdout exit]
-  [:div#node-output.node-output
-   [:div.detail-label
-    [:span (str (name node-id) " output")]
-    (when exit
-      [:span {:class (str "exit-badge" (when (pos? exit) " exit-nonzero"))}
-       (str "exit " exit)])]
-   [:pre#live-output.detail-pre (or stdout "")]])
-
 (defn node-detail [node state output]
   (let [stdout    (if (map? output) (:output output) output)
         files     (when (map? output) (:files-written output))
@@ -175,11 +165,6 @@
     [:span.iter-badge.badge-running "…"]
     [:span.iter-row-dur "running"]]
    [:div.iter-row-files [:span.iter-running-label "Claude Code working…"]]])
-
-(defn iteration-list [run-id evidence-list]
-  [:div#iteration-list
-   (for [ev (reverse evidence-list)]
-     (iteration-row run-id ev))])
 
 ;; ──────────────────────────────────────────
 ;; Wiggum — iteration detail (centre panel)
@@ -279,28 +264,6 @@
 ;; Wiggum — controls + step toggle
 ;; ──────────────────────────────────────────
 
-(defn iteration-controls [run-id paused?]
-  [:div {:id    "iteration-controls"
-         :class (str "iter-controls" (when paused? " iter-controls-visible"))}
-   [:button {:hx-post   (str "/runs/" run-id "/resume")
-             :hx-vals   "{\"action\":\"step\"}"
-             :hx-target "#iteration-controls"
-             :hx-swap   "outerHTML"
-             :class     "btn-primary"}
-    "Step ↓"]
-   [:button {:hx-post   (str "/runs/" run-id "/resume")
-             :hx-vals   "{\"action\":\"retry\"}"
-             :hx-target "#iteration-controls"
-             :hx-swap   "outerHTML"
-             :class     "btn"}
-    "Retry ↺"]
-   [:button {:hx-post   (str "/runs/" run-id "/resume")
-             :hx-vals   "{\"action\":\"abort\"}"
-             :hx-target "#iteration-controls"
-             :hx-swap   "outerHTML"
-             :class     "btn-danger"}
-    "Abort"]])
-
 (defn abort-button
   "Abort button for the topbar. Pass :disabled after the abort fires to grey it out."
   [run-id & [state]]
@@ -320,52 +283,6 @@
             :hx-swap   "outerHTML"
             :class     (str "btn" (when step-once? " btn-active"))}
    (if step-once? "Step ON" "Auto")])
-
-;; ──────────────────────────────────────────
-;; Wiggum — human review panel (shown on pause)
-;; ──────────────────────────────────────────
-
-(defn review-panel
-  "Full review panel shown when the run pauses. Includes evidence summary,
-   feedback textarea, and action buttons."
-  [run-id iteration evidence milestone?]
-  (let [ev      (or evidence {})
-        ver-ok? (or (nil? (:verification ev))
-                    (zero? (:exit (:verification ev))))
-        secs    (int (/ (or (:duration-ms ev) 0) 1000))]
-    [:div#review-panel.review-panel
-     [:div.review-header
-      [:span.review-title
-       (if milestone?
-         (str "⭐ Milestone reached · iteration " iteration)
-         (str "⏸ Paused · iteration " iteration))]
-      [:div.review-summary
-       [:span {:class (str "exit-badge" (when (pos? (or (:exit-code ev) 0)) " exit-nonzero"))}
-        (str "exit " (:exit-code ev))]
-       [:span (str secs "s")]
-       (when (seq (:files-written ev))
-         [:span.files-new (str "+" (count (:files-written ev)) " new")])
-       (when (seq (:files-edited ev))
-         [:span.files-edit (str "~" (count (:files-edited ev)) " edited")])
-       [:span {:class (str "ver-inline " (if ver-ok? "ver-ok" "ver-fail"))}
-        (if ver-ok? "✓ verified" "✗ verify failed")]]]
-
-     [:form.review-form
-      {:hx-post    (str "/runs/" run-id "/resume")
-       :hx-target  "#review-panel"
-       :hx-swap    "outerHTML"}
-      [:textarea.review-feedback
-       {:name        "feedback"
-        :rows        3
-        :placeholder "Steer the next iteration… e.g. \"Focus on the auth layer\" or \"The tests are slow, optimise them first\""}]
-      [:div.review-actions
-       [:button {:type "submit" :name "action" :value "abort" :class "btn-danger"}
-        "Abort"]
-       [:button {:type "submit" :name "action" :value "retry" :class "btn"}
-        "Retry iteration ↺"]
-       [:button {:type "submit" :name "action" :value "step" :class "btn-primary"}
-        "Continue →"]]]]))
-
 
 ;; ──────────────────────────────────────────
 ;; Steer widget — always-visible, both run types
