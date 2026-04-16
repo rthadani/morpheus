@@ -28,12 +28,14 @@
                                        the executor task-brief left in the work-dir"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
+   [clojure.edn                 :as edn]
    [clojure.java.io             :as io]
    [clojure.java.shell          :as shell]
    [clojure.string              :as str]
    [taoensso.timbre             :as log]
    [morpheus.executor.claude-code  :as cc]
    [morpheus.executor.evidence     :as evidence]
+   [morpheus.executor.llm          :as llm]
    [morpheus.executor.supervisor   :as supervisor]))
 
 ;; ──────────────────────────────────────────
@@ -50,6 +52,8 @@
      :work-dir       (atom nil)          ; set once the temp dir is created
      :control-packet (atom nil)          ; current control packet
      :iterations     (atom [])           ; vec of evidence maps (one per iteration)
+     :initial-state  (atom nil)          ; top-level-summary before any iteration ran (persisted)
+     :steer-buffer   (atom nil)          ; human guidance queued for next supervisor review
      :live-output    (atom "")          ; accumulated stdout for the running iteration
      :event-log      (atom [])           ; append-only log of all events
      :state          (atom :pending)     ; :pending :running :paused :done :aborted :error
@@ -204,9 +208,11 @@
      (str "> **Working directory**: you are already in the project root.\n"
           (if (seq work-dir-contents)
             (str "> **Current top-level contents**: " work-dir-contents "\n"
-                 "> All file paths must be relative to this directory."
-                 " Do NOT prefix them with a project or directory name.\n\n")
-            "> All source files are here. Do not look for a subdirectory matching the project name.\n\n")
+                 "> All files must be created DIRECTLY in this directory — not under a subdirectory that mirrors the project name.\n"
+                 "> When scaffolding with npm/vite/etc, ALWAYS pass `.` as the project name to scaffold into the current directory.\n"
+                 "> Example: `npm create vite@latest . -- --template react-ts` (NOT `npm create vite@latest my-app`)\n\n")
+            (str "> All source files must be created DIRECTLY in this directory. Do not create a subdirectory matching the project name.\n"
+                 "> When scaffolding with npm/vite/etc, ALWAYS pass `.` as the project name: e.g. `npm create vite@latest . -- --template react-ts`\n\n"))
           "# Objective\n\n"
           (:objective packet)
           (when (seq plan)
@@ -227,6 +233,70 @@
   "Returns the last N evidence maps for the supervisor."
   [iterations-atom n]
   (vec (take-last n @iterations-atom)))
+
+(defn- consume-steer!
+  "Atomically reads and clears the steer buffer. Returns the steer text or nil."
+  [run]
+  (first (swap-vals! (:steer-buffer run) (constantly nil))))
+
+;; ──────────────────────────────────────────
+;; Run snapshot — persist state after every iteration
+;; ──────────────────────────────────────────
+
+(defn- snapshot-path
+  "Returns the snapshot file path, or nil when no stable path is available.
+   Prefers project-dir so the snapshot survives temp-dir cleanup.
+   Falls back to work-dir. Returns nil when both are absent (no-op for snapshots)."
+  [run-config work-dir]
+  (if-let [pd (:project-dir run-config)]
+    (str pd "/morpheus-run-snapshot.edn")
+    (when work-dir
+      (str work-dir "/morpheus-run-snapshot.edn"))))
+
+(defn- write-snapshot!
+  "Serialises the run state after each completed iteration.
+   Written to project-dir/morpheus-run-snapshot.edn (or work-dir as fallback)
+   so execute! can resume automatically on the next invocation.
+   Failures are logged as warnings and swallowed — the run must not crash due to I/O here."
+  [run]
+  (try
+    (when-let [work-dir @(:work-dir run)]
+      (when-let [path (snapshot-path (:config run) work-dir)]
+        (let [snapshot {:run-id         (:run-id run)
+                        :objective      (:objective run)
+                        :config         (:config run)
+                        :work-dir       work-dir
+                        :iterations     @(:iterations run)
+                        :control-packet @(:control-packet run)
+                        :state          @(:state run)
+                        :started-at     (:started-at run)
+                        :initial-state  @(:initial-state run)}]
+          (io/make-parents (io/file path))
+          (spit path (pr-str snapshot))
+          (log/info "Snapshot written" {:path path :iterations (count @(:iterations run))}))))
+    (catch Exception e
+      (log/warn "Snapshot write failed (run continues)" {:message (ex-message e)}))))
+
+(defn read-snapshot
+  "Reads the snapshot EDN from path and returns it as a map."
+  [path]
+  (edn/read-string (slurp path)))
+
+(defn- load-snapshot
+  "Returns the snapshot map if a valid snapshot exists for run-config
+   and its work-dir is still present on disk, otherwise nil."
+  [run-config]
+  (try
+    (let [path (snapshot-path run-config nil)]
+      (when (and path (.exists (io/file path)))
+        (let [snap (read-snapshot path)]
+          (if (.exists (io/file (:work-dir snap "")))
+            snap
+            (do (log/warn "Snapshot found but work-dir is gone — starting fresh" {:path path})
+                nil)))))
+    (catch Exception e
+      (log/warn "Failed to read snapshot — starting fresh" {:message (ex-message e)})
+      nil)))
 
 ;; ──────────────────────────────────────────
 ;; Post-run CLAUDE.md generation
@@ -316,6 +386,71 @@
       ev)))
 
 ;; ──────────────────────────────────────────
+;; Execute! helpers
+;; ──────────────────────────────────────────
+
+(defn- build-next-packet
+  "Calls the supervisor and pins :success-check from run-config onto the result."
+  [run-config current-packet evidence-vec feedback initial-state]
+  (assoc (supervisor/review
+           (:objective run-config)
+           current-packet
+           evidence-vec
+           (or (:supervisor-model-config run-config)
+               (:model-config run-config {}))
+           feedback
+           initial-state)
+         :success-check (:success-check run-config "echo ok")))
+
+(defn- finish-run!
+  "Marks run done, optionally generates a project CLAUDE.md, emits :run-complete."
+  [run run-config work-dir reason iteration]
+  (set-state! run :done)
+  (when (:generate-claude-md? run-config)
+    (generate-project-claude-md! run work-dir))
+  (emit! run {:type :run-complete :reason reason :iteration iteration}))
+
+(defn- init-run!
+  "Sets up the work dir, initial-state snapshot, and first control packet.
+   Mutates run atoms as a side effect.
+   Returns {:work-dir :initial-state :start-iter :start-packet}."
+  [run run-config snapshot]
+  (let [run-id    (:run-id run)
+        resuming? (boolean snapshot)
+        work-dir  (if resuming?
+                    (do (log/info "Resuming from snapshot"
+                                  {:work-dir       (:work-dir snapshot)
+                                   :from-iteration (inc (count (:iterations snapshot)))})
+                        (:work-dir snapshot))
+                    (let [wd (cc/make-work-dir! run-id "wiggum")]
+                      (when-let [pd (:project-dir run-config)]
+                        (log/info "Copying project into work dir" {:src pd :dst wd})
+                        (shell/sh "sh" "-c" (str "cp -r " pd "/* " wd "/") :dir wd))
+                      wd))
+        _             (reset! (:work-dir run) work-dir)
+        initial-state (if resuming?
+                        (:initial-state snapshot)
+                        (let [tl (top-level-summary work-dir)]
+                          (when (seq tl)
+                            (str "Top-level contents of project root: " tl))))
+        _             (reset! (:initial-state run) initial-state)
+        _             (when resuming?
+                        (reset! (:iterations run)     (:iterations snapshot))
+                        (reset! (:control-packet run) (:control-packet snapshot)))
+        _             (emit! run {:type      (if resuming? :run-resumed :run-started)
+                                  :run-id    run-id
+                                  :objective (:objective run-config)})
+        [start-iter start-packet]
+        (if resuming?
+          [(inc (count (:iterations snapshot))) (:control-packet snapshot)]
+          (let [seed (supervisor/bootstrap run-config)]
+            [1 (build-next-packet run-config seed [] nil initial-state)]))]
+    {:work-dir      work-dir
+     :initial-state initial-state
+     :start-iter    start-iter
+     :start-packet  start-packet}))
+
+;; ──────────────────────────────────────────
 ;; Main loop
 ;; ──────────────────────────────────────────
 
@@ -324,69 +459,43 @@
    Sends events to (:event-ch run) as iterations proceed.
    Pauses after each iteration when step-once mode is enabled.
 
+   If project-dir contains a morpheus-run-snapshot.edn from a previous run
+   AND that run's work-dir still exists on disk, the loop resumes automatically
+   from the last completed iteration rather than starting fresh.
+
    run-config: see namespace docstring for keys."
   [run-id run-config]
-  (let [run (create-run run-id run-config)]
+  (let [run      (create-run run-id run-config)
+        snapshot (load-snapshot run-config)]
     (go
       (set-state! run :running)
-      (emit! run {:type :run-started :run-id run-id :objective (:objective run-config)})
       (try
-
-      ;; create a persistent work dir for the whole run
-      (let [work-dir (cc/make-work-dir! run-id "wiggum")]
-        (reset! (:work-dir run) work-dir)
-
-        ;; copy project into work dir once
-        (when-let [pd (:project-dir run-config)]
-          (log/info "Copying project into work dir" {:src pd :dst work-dir})
-          (shell/sh "sh" "-c" (str "cp -r " pd "/* " work-dir "/") :dir work-dir))
-
-        ;; snapshot the work-dir state after project copy — tells the supervisor
-        ;; what was already present before any iteration ran.
-        ;; Only top-level dirs/files: individual file paths would let the supervisor
-        ;; hallucinate subdirectory names (e.g. the project-dir name) as path prefixes.
-        (let [initial-state (let [tl (top-level-summary work-dir)]
-                              (when (seq tl)
-                                (str "Top-level contents of project root: " tl)))
-              locked-check (:success-check run-config "echo ok")
-              pin-check    #(assoc % :success-check locked-check)
-              seed-packet  (supervisor/bootstrap run-config)
-              first-packet (pin-check
-                             (supervisor/review
-                               (:objective run-config)
-                               seed-packet
-                               []
-                               (or (:supervisor-model-config run-config)
-                                   (:model-config run-config {}))
-                               nil
-                               initial-state))]
-          (loop [iteration      1
-                 control-packet first-packet]
-          (reset! (:control-packet run) control-packet)
-
-          (let [max-iter (or (:max-iterations run-config) 20)]
+        (let [{:keys [work-dir initial-state start-iter start-packet]}
+              (init-run! run run-config snapshot)]
+          (loop [iteration      start-iter
+                 control-packet start-packet]
+            (reset! (:control-packet run) control-packet)
             (cond
-              ;; hard cap reached
-              (> iteration max-iter)
-              (do
-                (set-state! run :done)
-                (emit! run {:type :run-complete :reason :max-iterations :iterations (dec iteration)}))
+              (> iteration (or (:max-iterations run-config) 20))
+              (do (set-state! run :done)
+                  (emit! run {:type :run-complete :reason :max-iterations
+                              :iterations (dec iteration)}))
 
-              ;; run aborted externally
               (= :aborted @(:state run))
               (emit! run {:type :run-aborted :run-id run-id})
 
               :else
-              (let [ev (run-iteration! run work-dir iteration control-packet)
-                    _  (swap! (:iterations run) conj ev)
-                    verified?      (verification-passed? (:verification ev))
+              (let [ev               (run-iteration! run work-dir iteration control-packet)
+                    _                (swap! (:iterations run) conj ev)
+                    _                (write-snapshot! run)
+                    verified?        (verification-passed? (:verification ev))
                     checkpoint-every (:checkpoint-every run-config)
                     milestone-hit?   (and checkpoint-every
                                           (zero? (mod iteration checkpoint-every)))]
 
                 (if (or (:step-once? @(:control run)) milestone-hit?)
 
-                  ;; ── pause for human review (always when step-once, even if verified) ──
+                  ;; ── pause for human review ──────────────────
                   (do
                     (set-state! run :paused)
                     (emit! run {:type       :run-paused
@@ -406,45 +515,33 @@
                         :retry-with-overrides
                         (recur iteration (merge control-packet (:overrides action)))
 
-                        ;; :step — if verified and human steps, we're done; otherwise supervisor
+                        ;; :step — verified = done; otherwise call supervisor
                         (if verified?
-                          (do (set-state! run :done)
-                              (when (:generate-claude-md? run-config)
-                                (generate-project-claude-md! run work-dir))
-                              (emit! run {:type :run-complete :reason :verified :iteration iteration}))
-                          (let [feedback    (when (seq (:feedback action)) (:feedback action))
-                                next-packet (pin-check
-                                              (supervisor/review
-                                                (:objective run-config)
-                                                control-packet
-                                                (recent-evidence (:iterations run) 3)
-                                                (or (:supervisor-model-config run-config) (:model-config run-config {}))
-                                                feedback
-                                                initial-state))]
-                            (recur (inc iteration) next-packet))))))
+                          (finish-run! run run-config work-dir :verified iteration)
+                          (let [steer  (consume-steer! run)
+                                fb     (when (seq (:feedback action)) (:feedback action))
+                                merged (cond (and fb steer) (str fb "\n\n" steer)
+                                             fb             fb
+                                             steer          steer
+                                             :else          nil)]
+                            (recur (inc iteration)
+                                   (build-next-packet run-config control-packet
+                                                      (recent-evidence (:iterations run) 3)
+                                                      merged initial-state)))))))
 
+                  ;; ── auto-continue ───────────────────────────
                   (if verified?
-                    ;; auto-mode + verified — done
-                    (do (set-state! run :done)
-                        (when (:generate-claude-md? run-config)
-                          (generate-project-claude-md! run work-dir))
-                        (emit! run {:type :run-complete :reason :verified :iteration iteration}))
+                    (finish-run! run run-config work-dir :verified iteration)
+                    (recur (inc iteration)
+                           (build-next-packet run-config control-packet
+                                              (recent-evidence (:iterations run) 3)
+                                              (consume-steer! run)
+                                              initial-state))))))))
 
-                    ;; ── auto-continue ──
-                    (let [next-packet (pin-check
-                                        (supervisor/review
-                                          (:objective run-config)
-                                          control-packet
-                                          (recent-evidence (:iterations run) 3)
-                                          (or (:supervisor-model-config run-config) (:model-config run-config {}))
-                                          nil
-                                          initial-state))]
-                        (recur (inc iteration) next-packet)))))))))
-        )
-      (catch Exception e
-        (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
-        (set-state! run :error)
-        (emit! run {:type :run-error :message (.getMessage e)}))))
+        (catch Exception e
+          (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
+          (set-state! run :error)
+          (emit! run {:type :run-error :message (.getMessage e)}))))
     run))
 
 ;; ──────────────────────────────────────────
@@ -476,6 +573,24 @@
   "Signals the loop to stop after the current iteration."
   [run]
   (reset! (:state run) :aborted))
+
+(defn steer!
+  "Queues human guidance to be passed to the supervisor before the next iteration.
+   Overwrites any previously queued steer. Pass nil or blank to clear."
+  [run text]
+  (let [t (when (seq text) text)]
+    (reset! (:steer-buffer run) t)
+    (emit! run {:type :steer-queued :text (or t "")})))
+
+(defn clear-snapshot!
+  "Deletes the snapshot file for run-config so the next execute! starts fresh.
+   Useful when you want to discard a previous run's state and begin again."
+  [run-config]
+  (when-let [path (snapshot-path run-config nil)]
+    (let [f (io/file path)]
+      (when (.exists f)
+        (.delete f)
+        (log/info "Snapshot deleted" {:path path})))))
 
 ;; ──────────────────────────────────────────
 ;; Introspection helpers

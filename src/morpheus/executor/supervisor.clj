@@ -66,6 +66,25 @@ and passing. Always advance to the next incomplete part of the goal.
 - Escalate clearly if verification failed, regressed, or was skipped.
 - Declare expected_files for this iteration so progress can be measured precisely.
 
+## Phased objectives
+
+When the original goal describes sequential phases (e.g. labelled sections like
+\"Phase 1\", \"=== Phase 2 ===\", \"Step 1:\", or numbered stages), treat each
+phase as a hard boundary:
+
+- Scope the control packet's objective to the **earliest incomplete phase only**.
+  Do not mention, reference, or instruct the executor to begin any later phase.
+- A phase is complete when its deliverables are present in the directory tree
+  and its verification passes (or the expected_files from the prior packet are
+  all present). Use the evidence — do not guess.
+- Once a phase is complete, advance the objective to the next phase. Do not ask
+  the executor to revisit finished phases.
+- Add an anti_goal entry explicitly forbidding the executor from starting later
+  phases: e.g. \"Do not start the backend — focus only on the React frontend.\"
+
+This ensures a human reviewer sees exactly one phase of work per iteration
+rather than the executor racing through multiple phases at once.
+
 ## What you must not do
 - Change the success check — it is owned by the product owner, not you.
 - Decompose work into parallel sub-agents or a DAG.

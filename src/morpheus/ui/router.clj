@@ -127,13 +127,14 @@
 
     :iteration-complete
     (let [ev (:evidence event)]
-      (str ;; remove the "running…" placeholder
+      (str ;; clear the running-row placeholder (keeps it in DOM at position 0)
            (h/html
              [:div {:id "iter-row-running" :hx-swap-oob "outerHTML:#iter-row-running"}])
-           ;; prepend completed row to iteration list
+           ;; insert completed row immediately after the cleared running-row placeholder
+           ;; (afterend keeps #iter-row-running pinned at the top for next :iteration-started)
            (h/html
-             [:div {:hx-swap-oob "afterbegin:#iteration-list"}
-              (ui/iteration-row run-id ev)])
+             (update (ui/iteration-row run-id ev) 1
+                     assoc :hx-swap-oob "afterend:#iter-row-running"))
            ;; update detail panel to show latest
            (h/html
              [:div {:hx-swap-oob "innerHTML:#wg-detail"}
@@ -209,6 +210,16 @@
             (ui/log-line :warn
                          (str "⚠ rate limit — falling back to " (:fallback event)
                               " (delay " (:delay-ms event) "ms)"))]))
+
+    :steer-queued
+    (let [text (:text event "")]
+      (str (h/html
+             [:div {:id "log-tail" :hx-swap-oob "beforeend"}
+              (ui/log-line :info
+                           (str "↳ steer queued: "
+                                (if (> (count text) 60)
+                                  (str (subs text 0 60) "…")
+                                  text)))])))
 
     :control-changed
     (str (h/html
@@ -365,6 +376,28 @@
           ;; hide the review panel immediately on submit
           (html-resp [:div#review-panel {:style "display:none"}]))))))
 
+(defn steer-handler [run-store]
+  (fn [{:keys [path-params form-params]}]
+    (let [run-id (parse-long (:id path-params))
+          run    (store/get-run run-store run-id)]
+      (if-not run
+        {:status 404 :body "Run not found"}
+        (let [text (str/trim (get form-params "steer" ""))]
+          (when (seq text)
+            (case (store/run-type run)
+              :wiggum (wiggum/steer! run text)
+              :dag    (engine/steer! run text)))
+          (html-resp (ui/steer-widget run-id)))))))
+
+(defn wiggum-abort-handler [run-store]
+  (fn [{:keys [path-params]}]
+    (let [run-id (parse-long (:id path-params))
+          run    (store/get-run run-store run-id)]
+      (if-not run
+        {:status 404 :body "Run not found"}
+        (do (wiggum/abort! run)
+            (html-resp (ui/abort-button run-id :disabled)))))))
+
 (defn wiggum-step-handler [run-store]
   (fn [{:keys [path-params]}]
     (let [run-id (parse-long (:id path-params))
@@ -436,7 +469,9 @@
          ["/stream"              {:get  (stream-handler run-store)}]
          ["/step"                {:post (wiggum-step-handler run-store)}]
          ["/auto"                {:post (wiggum-auto-handler run-store)}]
+         ["/abort"               {:post (wiggum-abort-handler run-store)}]
          ["/resume"              {:post (wiggum-resume-handler run-store)}]
+         ["/steer"               {:post (steer-handler run-store)}]
          ["/checkpoint/:node-id" {:post (checkpoint-handler run-store)}]
          ["/nodes/:node-id"      {:get  (node-detail-handler run-store)}]
          ["/iterations/:n"       {:get  (iteration-detail-handler run-store)}]]]

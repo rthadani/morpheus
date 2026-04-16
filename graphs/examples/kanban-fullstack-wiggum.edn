@@ -1,31 +1,5 @@
 ;; Kanban board — full-stack with Docker deploy, Wiggum loop, step-once mode
 ;;
-;; Natural iteration sequence:
-;;
-;;  Phase 1 — Frontend (React + TypeScript + Vite)
-;;   1.  Scaffold: Vite project, deps, test setup
-;;   2.  Data model: useKanban hook, Board/List/Card types
-;;   3.  Core CRUD: add/rename/delete lists and cards
-;;   4.  Drag-and-drop: HTML5 DnD, reorder within + between lists
-;;   5.  Frontend tests passing
-;;
-;;  Phase 2 — Backend (Node.js + Express + SQLite)
-;;   6.  Server scaffold: Express + TypeScript, SQLite via better-sqlite3
-;;   7.  DB schema + migrations: boards, lists, cards tables
-;;   8.  REST API: CRUD endpoints for boards, lists, cards
-;;   9.  Wire frontend to API (replace localStorage with fetch calls)
-;;   10. Backend + integration tests passing
-;;
-;;  Phase 3 — Deploy (Podman + podman-compose)
-;;   11. Dockerfile: multi-stage build (build frontend, serve via Express)
-;;   12. docker-compose.yml: app service + volume for SQLite db file
-;;   13. Health check endpoint, graceful shutdown
-;;   14. `docker-compose up` starts and all smoke tests pass
-;;
-;; step-once? true — pauses after every iteration for human review.
-;; At the terminal: step / retry / abort
-;; In the UI: Continue / Retry / Abort with optional feedback
-;;
 ;; Usage:
 ;;   clj -M:run graphs/examples/kanban-fullstack-wiggum.edn --project-dir ./my-kanban
 

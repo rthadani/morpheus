@@ -23,6 +23,7 @@
      :context        (atom (merge (:graph/context graph) initial-context))
      :state          (atom {})          ; node-id → :pending|:running|:done|:paused|:error
      :output-buffers (atom {})          ; node-id → accumulated stdout string (live)
+     :steer-buffer   (atom nil)          ; human guidance queued for next node
      :event-ch       event-ch
      :event-mult     (async/mult event-ch) ; created once; SSE taps into this
      :resume-ch      (chan 1)              ; human action → executor (approve/revise/abort)
@@ -55,10 +56,12 @@
                         (swap! output-buffers assoc (:id node) ""))
         ctx-with-buf  (assoc @context ::output-buffers output-buffers)
         resolved      (ctx/resolve-inputs (:inputs node {}) ctx-with-buf)
+        steer         (first (swap-vals! (:steer-buffer run) (constantly nil)))
+        ctx-final     (if steer (assoc ctx-with-buf ::steer steer) ctx-with-buf)
         start         (System/currentTimeMillis)]
     (try
       (let [output   (dispatch/execute-node!
-                       node resolved ctx-with-buf graph-atom event-ch)
+                       node resolved ctx-final graph-atom event-ch)
             duration (- (System/currentTimeMillis) start)]
         (if (= output dispatch/checkpoint-sentinel)
           :paused
@@ -150,3 +153,9 @@
                 :feedback \"optional string\"}"
   [run action-map]
   (put! (:resume-ch run) action-map))
+
+(defn steer!
+  "Queues human guidance to be injected into context before the next node runs.
+   Overwrites any previously queued steer. Pass nil or blank to clear."
+  [run text]
+  (reset! (:steer-buffer run) (when (seq text) text)))

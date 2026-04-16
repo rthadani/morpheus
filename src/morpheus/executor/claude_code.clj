@@ -86,13 +86,16 @@
                         (or (:done-check node)
                             "The task described above is complete.")))]
     ;; interpolate {{slot}} placeholders from inputs
-    (reduce-kv
-      (fn [s k v]
-        (str/replace s
-                     (re-pattern (str "\\{\\{" (name k) "\\}\\}"))
-                     (str (or v ""))))
-      template
-      inputs)))
+    (let [rendered (reduce-kv
+                     (fn [s k v]
+                       (str/replace s
+                                    (re-pattern (str "\\{\\{" (name k) "\\}\\}"))
+                                    (str (or v ""))))
+                     template
+                     inputs)]
+      (if-let [steer (get context ::steer)]
+        (str rendered "\n\n## Human guidance\n\n" steer "\n")
+        rendered))))
 
 ;; ──────────────────────────────────────────
 ;; Stream-JSON parsing

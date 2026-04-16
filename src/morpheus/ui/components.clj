@@ -241,7 +241,7 @@
         [:pre.iter-output output]])]))
 
 (defn iteration-live-panel [iteration]
-  [:div#wg-detail.iter-detail
+  [:div#wg-detail.wg-detail-body
    [:div.iter-detail-header
     [:span.iter-detail-title (str "Iteration #" iteration)]
     [:span.iter-badge.badge-running "running…"]]
@@ -301,6 +301,18 @@
              :class     "btn-danger"}
     "Abort"]])
 
+(defn abort-button
+  "Abort button for the topbar. Pass :disabled after the abort fires to grey it out."
+  [run-id & [state]]
+  (let [disabled? (= state :disabled)]
+    [:button {:id       "abort-btn"
+              :hx-post  (str "/runs/" run-id "/abort")
+              :hx-target "#abort-btn"
+              :hx-swap  "outerHTML"
+              :class    (str "btn-danger" (when disabled? " btn-disabled"))
+              :disabled disabled?}
+     "Abort ✕"]))
+
 (defn step-toggle [run-id step-once?]
   [:button {:id        "step-toggle"
             :hx-post   (str "/runs/" run-id (if step-once? "/auto" "/step"))
@@ -356,6 +368,22 @@
 
 
 ;; ──────────────────────────────────────────
+;; Steer widget — always-visible, both run types
+;; ──────────────────────────────────────────
+
+(defn steer-widget [run-id]
+  [:div#steer-widget.steer-widget
+   [:form.steer-form
+    {:hx-post   (str "/runs/" run-id "/steer")
+     :hx-target "#steer-widget"
+     :hx-swap   "outerHTML"}
+    [:textarea.steer-input
+     {:name        "steer"
+      :rows        1
+      :placeholder "Guide next iteration… (sent to supervisor before it plans the next step)"}]
+    [:button {:type "submit" :class "btn-primary steer-btn"} "Steer →"]]])
+
+;; ──────────────────────────────────────────
 ;; Wiggum — full shell page (mail split-view)
 ;; ──────────────────────────────────────────
 
@@ -387,7 +415,8 @@
         [:span#wg-iter-count.wg-iter (str "iter " iteration)]
         (when-let [wd (:work-dir summary)]
           [:span.wg-workdir {:title wd} (str "→ " wd)])
-        (step-toggle run-id step-once?)]
+        (step-toggle run-id step-once?)
+        (abort-button run-id)]
 
        ;; ── Review panel (hidden until :run-paused) ────────
        [:div#review-panel {:style "display:none"}]
@@ -403,11 +432,12 @@
          (for [ev (reverse evidence-list)]
            (iteration-row run-id ev))]]
 
-       ;; ── Centre: iteration detail ────────────────────────
+       ;; ── Centre: iteration detail + steer ───────────────
        [:div.wg-detail-col
         [:div.wg-pane-header "Detail"]
         [:div#wg-detail.wg-detail-body
-         (if latest (iteration-detail latest) (iteration-detail-placeholder))]]
+         (if latest (iteration-detail latest) (iteration-detail-placeholder))]
+        (steer-widget run-id)]
 
        ;; ── Right: control packet ───────────────────────────
        [:div.wg-packet-col
@@ -448,4 +478,5 @@
         [:div#side-body.side-body
          [:div#node-output.node-output]
          [:div#log-lines]]
-        [:div#checkpoint-panel.checkpoint-panel]]]]]))
+        [:div#checkpoint-panel.checkpoint-panel]
+        (steer-widget run-id)]]]]))
