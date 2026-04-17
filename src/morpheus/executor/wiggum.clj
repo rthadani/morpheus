@@ -36,6 +36,7 @@
    [morpheus.executor.claude-code  :as cc]
    [morpheus.executor.evidence     :as evidence]
    [morpheus.executor.llm          :as llm]
+   [morpheus.executor.store        :as store]
    [morpheus.executor.supervisor   :as supervisor]))
 
 ;; ──────────────────────────────────────────
@@ -206,6 +207,12 @@
          plan        (when (seq (:plan packet))
                        (map #(strip-path-prefix % path-prefix-to-strip) (:plan packet)))]
      (str "> **Working directory**: you are already in the project root.\n"
+          "> Write ALL output files directly here using simple relative paths "
+          "(e.g. `deps.edn`, `src/trader/llm.clj`).\n"
+          "> Paths mentioned in the objective that look like `graphs/...`, "
+          "`/home/...`, or any other directory are **read-only source references** "
+          "— copy FROM them, never create directories or files AT those paths.\n"
+          "> Never create a wrapper subdirectory; `deps.edn` lives at `./deps.edn`, not `graphs/foo/deps.edn`.\n"
           (if (seq work-dir-contents)
             (str "> **Current top-level contents**: " work-dir-contents "\n"
                  "> All files must be created DIRECTLY in this directory — not under a subdirectory that mirrors the project name.\n"
@@ -221,9 +228,15 @@
           (when (seq constraints)
             (str "\n\n## Constraints\n\n"
                  (str/join "\n" (map #(str "- " %) constraints))))
+          (when (seq (:expected-files packet))
+            (str "\n\n## Stop when — this iteration only\n\n"
+                 "Create **only** the following deliverables, then stop immediately.\n"
+                 "Do not start any other files, phases, or features beyond this list:\n"
+                 (str/join "\n" (map #(str "- " %) (:expected-files packet)))))
           (when-let [sc (:success-check packet)]
-            (str "\n\n## Done when\n\n"
-                 "Running `" sc "` exits 0."))
+            (str "\n\n## Overall goal check (do not run this yourself)\n\n"
+                 "The supervisor will run `" sc "` after you stop "
+                 "to assess overall progress. Your job is only to deliver the files above."))
           (when (seq anti-goals)
             (str "\n\n## Do not\n\n"
                  (str/join "\n" (map #(str "- " %) anti-goals))))
@@ -408,6 +421,7 @@
   (set-state! run :done)
   (when (:generate-claude-md? run-config)
     (generate-project-claude-md! run work-dir))
+  (store/persist-run! run)
   (emit! run {:type :run-complete :reason reason :iteration iteration}))
 
 (defn- init-run!
@@ -488,6 +502,7 @@
               (let [ev               (run-iteration! run work-dir iteration control-packet)
                     _                (swap! (:iterations run) conj ev)
                     _                (write-snapshot! run)
+                    _                (store/persist-run! run)
                     verified?        (verification-passed? (:verification ev))
                     checkpoint-every (:checkpoint-every run-config)
                     milestone-hit?   (and checkpoint-every

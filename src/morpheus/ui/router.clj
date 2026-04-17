@@ -172,14 +172,13 @@
 
     :iteration-complete
     (let [ev (:evidence event)]
-      (str ;; clear the running-row placeholder (keeps it in DOM at position 0)
-           (h/html
-             [:div {:id "iter-row-running" :hx-swap-oob "outerHTML:#iter-row-running"}])
-           ;; insert completed row immediately after the cleared running-row placeholder
-           ;; (afterend keeps #iter-row-running pinned at the top for next :iteration-started)
+      (str ;; afterend FIRST — inserts sibling while #iter-row-running is still in DOM
+           ;; outerHTML SECOND — replaces it; afterend runs against the live element, not the detached one
            (h/html
              (update (ui/iteration-row run-id ev) 1
                      assoc :hx-swap-oob "afterend:#iter-row-running"))
+           (h/html
+             [:div {:id "iter-row-running" :hx-swap-oob "outerHTML:#iter-row-running"}])
            ;; update detail panel to show latest
            (h/html
              [:div {:hx-swap-oob "innerHTML:#wg-detail"}
@@ -404,6 +403,8 @@
 (defn start-wiggum-handler [run-store]
   (fn [{:keys [body-params]}]
     (let [run-id (System/currentTimeMillis)
+          _      (when-let [pd (:project-dir body-params)]
+                   (store/load-ui-state! run-store pd))
           run    (wiggum/execute! run-id body-params)]
       (store/add-run! run-store run)
       {:status  201

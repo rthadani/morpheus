@@ -42,6 +42,8 @@
         "--max-iterations" (recur (drop 2 remaining)
                                   (assoc acc :max-iterations
                                          (parse-long (second remaining))))
+        "--view"           (recur (rest remaining)
+                                  (assoc acc :view-only? true))
         (recur (rest remaining) (assoc acc :edn-file (first remaining)))))))
 
 ;; ──────────────────────────────────────────
@@ -77,7 +79,8 @@
     (let [ev (:evidence event)]
       (println (str "   +" (count (:files-written ev)) " written"
                     "  ~" (count (:files-edited ev)) " edited"
-                    "  exit=" (:exit-code ev)))
+                    "  exit=" (:exit-code ev)
+                    (when-let [m (:model ev)] (str "  model=" m))))
       (when-let [slop (:slop-signals ev)]
         (when (or (:helpers-added? slop) (:only-new-files? slop)
                   (> (:new-file-ratio slop 0) 70))
@@ -192,16 +195,32 @@
 ;; ──────────────────────────────────────────
 
 (defn -main [& args]
-  (let [{:keys [edn-file project-dir step-once? max-iterations]
+  (let [{:keys [edn-file project-dir step-once? max-iterations view-only?]
          :as   opts} (parse-args args)]
 
-    (when-not edn-file
+    (when-not (or edn-file (and view-only? project-dir))
       (println "Usage: clj -M:run <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]")
+      (println "       clj -M:run --view --project-dir <path>")
       (println)
       (println "Examples:")
       (println "  clj -M:run graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react")
       (println "  clj -M:run graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step")
+      (println "  clj -M:run --view --project-dir /tmp/todo-react")
       (System/exit 1))
+
+    (when view-only?
+      (sys/start!)
+      (let [run-store (get-in @sys/system [:run-store])
+            port      (or (some-> (System/getenv "PORT") parse-long) 7777)
+            run       (store/load-ui-state! run-store project-dir)]
+        (if run
+          (do (println (str "UI → http://localhost:" port "/runs/" (:run-id run)))
+              (println "Press Ctrl-C to stop.")
+              (.addShutdownHook (Runtime/getRuntime) (Thread. #(sys/stop!)))
+              @(promise))
+          (do (println (str "No saved UI state found in " project-dir))
+              (sys/stop!)
+              (System/exit 1)))))
 
     (let [raw   (edn/read-string (slurp edn-file))
           rtype (detect-type raw)]
