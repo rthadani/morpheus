@@ -35,6 +35,7 @@
    [taoensso.timbre             :as log]
    [morpheus.executor.claude-code  :as cc]
    [morpheus.executor.evidence     :as evidence]
+   [morpheus.executor.judge        :as judge]
    [morpheus.executor.llm          :as llm]
    [morpheus.executor.store        :as store]
    [morpheus.executor.supervisor   :as supervisor]))
@@ -136,7 +137,8 @@
                                           (map #(str/replace % #"^/" ""))
                                           (map #(str/replace % #"/$" "")))))))
                        distinct)
-        excludes  (mapcat #(vector "-not" "-path" (str "*/" % "/*")) ignores)
+        excludes  (concat ["-not" "-path" "*/.git/*"]
+                          (mapcat #(vector "-not" "-path" (str "*/" % "/*")) ignores))
         args      (concat ["find" "." "-type" "f"] excludes)
         lines     (str/split-lines
                     (str/trim (:out (apply shell/sh (concat args [:dir work-dir])))))]
@@ -144,6 +146,124 @@
 
 (defn- verification-passed? [verification]
   (and (some? verification) (zero? (:exit verification))))
+
+;; ──────────────────────────────────────────
+;; Git snapshots — per-phase backup & restore
+;;
+;; A lightweight repo inside work-dir is used only for snapshotting. Baseline
+;; commit captures the copied-in project state; each completed phase commits
+;; on top of it. When the judge recommends a restore, we `git reset --hard`
+;; back to the previous phase's commit and re-enter the phase.
+;; ──────────────────────────────────────────
+
+(defn- git-sh [work-dir & args]
+  (apply shell/sh (concat (cons "git" args) [:dir work-dir])))
+
+(defn- git-repo? [work-dir]
+  (.exists (io/file work-dir ".git")))
+
+(def ^:private snapshot-exclude
+  "Additive .git/info/exclude content for the morpheus snapshot repo.
+   Filters dependency trees, build outputs, caches, compiled bytecode,
+   runtime DB/log files, IDE configs and OS files so the judge's diff
+   stays focused on source the agent actually wrote."
+  (str/join "\n"
+    [;; morpheus bookkeeping
+     "CLAUDE.md"
+     "morpheus-run-snapshot.edn"
+     "morpheus-ui-state.edn"
+     ;; node / js
+     "node_modules/"
+     ".next/"
+     ".nuxt/"
+     ".turbo/"
+     ".vercel/"
+     ".cache/"
+     ".parcel-cache/"
+     ".vite/"
+     "coverage/"
+     ".nyc_output/"
+     ;; python
+     "__pycache__/"
+     "*.pyc"
+     "*.pyo"
+     ".venv/"
+     "venv/"
+     "env/"
+     ".pytest_cache/"
+     ".mypy_cache/"
+     ".ruff_cache/"
+     ".tox/"
+     "*.egg-info/"
+     ;; jvm / clojure
+     "target/"
+     ".cpcache/"
+     ".clj-kondo/.cache/"
+     ".lsp/.cache/"
+     "*.class"
+     ;; rust / go
+     "vendor/"
+     ;; generic build outputs
+     "build/"
+     "dist/"
+     "out/"
+     ".gradle/"
+     ;; runtime data — never source
+     "*.db"
+     "*.db-journal"
+     "*.sqlite"
+     "*.sqlite3"
+     "*.log"
+     ;; editor / ide / os
+     ".idea/"
+     ".vscode/"
+     ".DS_Store"
+     "Thumbs.db"
+     ""]))
+
+(defn- ensure-git-repo!
+  "Idempotently initialises a git repo in work-dir and makes a baseline commit.
+   Writes a baseline .git/info/exclude (additive to any project .gitignore so
+   the project's own ignore rules are left untouched) covering common heavy
+   dirs, caches, build outputs and runtime artefacts. The snapshot repo lives
+   only inside work-dir for diffing — it is never committed back."
+  [work-dir]
+  (when-not (git-repo? work-dir)
+    (log/info "Initialising git snapshot repo" {:dir work-dir})
+    (git-sh work-dir "init" "-q")
+    (git-sh work-dir "config" "user.email" "morpheus@localhost")
+    (git-sh work-dir "config" "user.name"  "morpheus")
+    (let [excl (io/file work-dir ".git" "info" "exclude")]
+      (io/make-parents excl)
+      (spit excl snapshot-exclude))
+    (git-sh work-dir "add" "-A")
+    (git-sh work-dir "commit" "-q" "--allow-empty" "-m" "morpheus:baseline")))
+
+(defn- git-diff
+  "Raw diff of the working tree against the last commit. Uses `git add -N`
+   (intent-to-add) so brand-new untracked files show up in the diff. Clears
+   the intent-to-add afterwards so a later `git add -A && git commit` behaves
+   normally."
+  [work-dir]
+  (git-sh work-dir "add" "--intent-to-add" ".")
+  (let [d (:out (git-sh work-dir "--no-pager" "diff" "HEAD"))]
+    (git-sh work-dir "reset" "-q")
+    d))
+
+(defn- git-commit-phase!
+  "Commits the current phase's changes on top of the previous phase's commit."
+  [work-dir iteration]
+  (git-sh work-dir "add" "-A")
+  (git-sh work-dir "commit" "-q" "--allow-empty" "-m"
+          (str "morpheus:phase-end iter-" iteration)))
+
+(defn- git-restore!
+  "Resets work-dir to the last committed state and removes any untracked files
+   the judged phase added."
+  [work-dir]
+  (log/info "Restoring work-dir via git reset --hard" {:dir work-dir})
+  (git-sh work-dir "reset" "--hard" "-q" "HEAD")
+  (git-sh work-dir "clean" "-fdq"))
 
 ;; ──────────────────────────────────────────
 ;; Provider fallback
@@ -390,9 +510,30 @@
                              (run-verification! work-dir success-check))
           top-level        (top-level-summary work-dir)
           tree             (dir-tree work-dir)
-          expected-check   (when (seq (:expected-files control-packet))
-                             (check-expected-files work-dir (:expected-files control-packet)))
-          ev               (evidence/build iteration cc-result verification top-level tree expected-check)]
+          expected         (:expected-files control-packet)
+          expected-check   (when (seq expected)
+                             (check-expected-files work-dir expected))
+          ;; Phase boundary: a phase is the set of expected-files in the packet.
+          ;; It ends the iteration in which all of those files are present (or
+          ;; immediately, when the packet declares no expected-files at all).
+          phase-ended?     (or (empty? expected)
+                               (empty? (:missing expected-check)))
+          ev0              (evidence/build iteration cc-result verification top-level tree expected-check)
+          review           (when (and phase-ended?
+                                      (not (false? (:review? config))))
+                             (judge/review!
+                               (or (:supervisor-model-config config)
+                                   (:model-config config {}))
+                               {:objective      (:objective control-packet)
+                                :expected-files expected
+                                :constraints    (:constraints control-packet)
+                                :anti-goals     (:anti-goals control-packet)
+                                :files-written  (:files-written ev0)
+                                :files-edited   (:files-edited ev0)
+                                :files-deleted  (:files-deleted ev0)
+                                :success-check  (:success-check control-packet)
+                                :diff           (git-diff work-dir)}))
+          ev               (assoc ev0 :review review :phase-ended? phase-ended?)]
       (emit! run {:type      :iteration-complete
                   :iteration iteration
                   :evidence  ev})
@@ -442,6 +583,7 @@
                         (shell/sh "sh" "-c" (str "cp -r " pd "/* " wd "/") :dir wd))
                       wd))
         _             (reset! (:work-dir run) work-dir)
+        _             (ensure-git-repo! work-dir)
         initial-state (if resuming?
                         (:initial-state snapshot)
                         (let [tl (top-level-summary work-dir)]
@@ -506,23 +648,38 @@
                     verified?        (verification-passed? (:verification ev))
                     checkpoint-every (:checkpoint-every run-config)
                     milestone-hit?   (and checkpoint-every
-                                          (zero? (mod iteration checkpoint-every)))]
+                                          (zero? (mod iteration checkpoint-every)))
+                    phase-ended?     (boolean (:phase-ended? ev))
+                    review           (:review ev)
+                    review-threshold (or (:review-threshold run-config) :high)
+                    review-pause?    (and phase-ended?
+                                          (judge/requires-pause? review review-threshold))
+                    commit-phase!    (fn [] (when phase-ended? (git-commit-phase! work-dir iteration)))]
 
-                (if (or (:step-once? @(:control run)) milestone-hit?)
+                (if (or (:step-once? @(:control run)) milestone-hit? review-pause?)
 
                   ;; ── pause for human review ──────────────────
                   (do
                     (set-state! run :paused)
-                    (emit! run {:type       :run-paused
-                                :iteration  iteration
-                                :verified?  verified?
-                                :milestone? milestone-hit?})
+                    (emit! run {:type          :run-paused
+                                :iteration     iteration
+                                :verified?     verified?
+                                :milestone?    milestone-hit?
+                                :phase-ended?  phase-ended?
+                                :review        review
+                                :review-pause? review-pause?})
                     (let [action (<! (:resume-ch run))]
                       (set-state! run :running)
                       (case (:action action)
                         :abort
                         (do (set-state! run :aborted)
                             (emit! run {:type :run-aborted}))
+
+                        ;; :restore — judge says this phase did damage; roll back
+                        ;; to the previous accepted state and re-enter the phase.
+                        :restore
+                        (do (git-restore! work-dir)
+                            (recur iteration control-packet))
 
                         :retry
                         (recur iteration control-packet)
@@ -532,13 +689,15 @@
 
                         ;; :step — verified = done; otherwise call supervisor
                         (if verified?
-                          (finish-run! run run-config work-dir :verified iteration)
+                          (do (commit-phase!)
+                              (finish-run! run run-config work-dir :verified iteration))
                           (let [steer  (consume-steer! run)
                                 fb     (when (seq (:feedback action)) (:feedback action))
                                 merged (cond (and fb steer) (str fb "\n\n" steer)
                                              fb             fb
                                              steer          steer
                                              :else          nil)]
+                            (commit-phase!)
                             (recur (inc iteration)
                                    (build-next-packet run-config control-packet
                                                       (recent-evidence (:iterations run) 3)
@@ -546,12 +705,14 @@
 
                   ;; ── auto-continue ───────────────────────────
                   (if verified?
-                    (finish-run! run run-config work-dir :verified iteration)
-                    (recur (inc iteration)
-                           (build-next-packet run-config control-packet
-                                              (recent-evidence (:iterations run) 3)
-                                              (consume-steer! run)
-                                              initial-state))))))))
+                    (do (commit-phase!)
+                        (finish-run! run run-config work-dir :verified iteration))
+                    (do (commit-phase!)
+                        (recur (inc iteration)
+                               (build-next-packet run-config control-packet
+                                                  (recent-evidence (:iterations run) 3)
+                                                  (consume-steer! run)
+                                                  initial-state)))))))))
 
         (catch Exception e
           (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
@@ -579,8 +740,11 @@
   "Called by the HTTP handler when a human acts on a paused run.
 
    action-map keys:
-     :action   — :step | :retry | :retry-with-overrides | :abort
-     :overrides — map merged into control packet (for :retry-with-overrides)"
+     :action   — :step | :retry | :retry-with-overrides | :restore | :abort
+     :overrides — map merged into control packet (for :retry-with-overrides)
+
+   :restore resets the work-dir to the previously-accepted git commit and
+   re-enters the current phase, discarding whatever the executor just did."
   [run action-map]
   (put! (:resume-ch run) action-map))
 

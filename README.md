@@ -28,33 +28,6 @@ graphs/examples/todo-app-react-wiggum.edn    (React + TypeScript)
 
 Use this when you want the system to handle decomposition and course-correction autonomously.
 
-## Architecture
-
-```
-graphs/                   EDN run configs — pure data, no code
-src/morpheus/
-  system.clj              Integrant system + REPL helpers (go!, start!, stop!)
-  main.clj                CLI entry point (clj -M:run)
-  graph/
-    schema.clj            Node constructors and validation
-    topo.clj              Topological sort, runnable-nodes
-    context.clj           Context store, input resolution, prompt rendering
-  executor/
-    claude_code.clj       Spawns claude --print as a subprocess, generates CLAUDE.md per node
-    llm.clj               Thin wrapper around claude --print for supervisor calls
-    wiggum.clj            Iteration loop: run → evidence → supervisor → repeat
-    supervisor.clj        Reviews evidence, emits next control packet (calls llm.clj)
-    evidence.clj          Captures file diffs, slop signals, verification results
-    dispatch.clj          Multimethod: execute-node! dispatches on :type
-    engine.clj            DAG executor loop (core.async go-loop)
-    store.clj             In-memory run store
-  ui/
-    components.clj        Hiccup components — pure functions
-    router.clj            Reitit routes + SSE handler
-  graphs/
-    expanders.clj         Graph expansion functions (planning → milestone nodes)
-```
-
 ## Running
 
 ### Prerequisites

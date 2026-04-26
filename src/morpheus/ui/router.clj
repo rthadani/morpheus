@@ -199,17 +199,20 @@
                                   (if (zero? (:exit v)) " ✓" " ✗"))))])))
 
     :run-paused
-    (let [run       (store/get-run run-store run-id)
-          latest-ev (when run (last @(:iterations run)))
-          milestone? (:milestone? event)]
+    (let [run          (store/get-run run-store run-id)
+          latest-ev    (when run (last @(:iterations run)))
+          milestone?   (:milestone? event)
+          review       (:review event)
+          review-pause? (:review-pause? event)]
       (str (h/html
              [:div#review-panel.review-panel
               {:hx-swap-oob "outerHTML:#review-panel"}
               [:div.review-header
                [:span.review-title
-                (if milestone?
-                  (str "⭐ Milestone · iteration " (:iteration event))
-                  (str "⏸ Paused · iteration " (:iteration event)))]
+                (cond
+                  review-pause? (str "⚠ Judge review · iteration " (:iteration event))
+                  milestone?    (str "⭐ Milestone · iteration " (:iteration event))
+                  :else         (str "⏸ Paused · iteration " (:iteration event)))]
                (when latest-ev
                  (let [ev      latest-ev
                        ver-ok? (or (nil? (:verification ev))
@@ -225,21 +228,32 @@
                       [:span.files-edit (str "~" (count (:files-edited ev)) " edited")])
                     [:span {:class (str "ver-inline " (if ver-ok? "ver-ok" "ver-fail"))}
                      (if ver-ok? "✓ verified" "✗ verify failed")]]))]
+              (when review
+                (ui/judge-review-block review))
               [:form.review-form
                {:hx-post   (str "/runs/" run-id "/resume")
                 :hx-target "#review-panel"
                 :hx-swap   "outerHTML"}
                [:textarea.review-feedback
-                {:name "feedback" :rows 3
+                {:id          "review-feedback-text"
+                 :name        "feedback"
+                 :rows        3
+                 :hx-preserve "true"
                  :placeholder "Steer the next iteration… e.g. \"Focus on the auth layer\" or leave blank to let the supervisor decide"}]
                [:div.review-actions
                 [:button {:type "submit" :name "action" :value "abort"   :class "btn-danger"}  "Abort"]
+                (when review
+                  [:button {:type "submit" :name "action" :value "restore" :class "btn-warn"
+                            :title "Discard this phase's changes and re-enter the phase"}
+                   "Restore ⎌"])
                 [:button {:type "submit" :name "action" :value "retry"   :class "btn"}         "Retry ↺"]
                 [:button {:type "submit" :name "action" :value "step"    :class "btn-primary"}  "Continue →"]]]])
            (h/html
              [:div {:id "log-tail" :hx-swap-oob "beforeend"}
-              (ui/log-line :warn
-                           (str (if milestone? "⭐ milestone" "⏸ paused")
+              (ui/log-line (if review-pause? :warn (if milestone? :info :warn))
+                           (str (cond review-pause? "⚠ judge paused"
+                                      milestone?    "⭐ milestone"
+                                      :else         "⏸ paused")
                                 " after iteration " (:iteration event)))])))
 
     :output-line
@@ -326,6 +340,19 @@
                       (send! ch (sse-event evt-name fragment))))
                   (catch Exception e
                     (log/error e "SSE replay error" {:event-type (:type event)})))))
+            ;; For wiggum runs, the page already renders past iterations + the
+            ;; control packet at page-load time. The one piece that's missing
+            ;; on a refresh-while-paused is the review dialog. Replay just the
+            ;; most recent :run-paused event so the dialog reappears.
+            (when (and (= :wiggum rtype) (= :paused @(:state run)))
+              (when-let [pause-ev (->> @(:event-log run)
+                                       (filter #(= :run-paused (:type %)))
+                                       last)]
+                (try
+                  (when-let [fragment (wiggum-fragment run-id pause-ev run-store)]
+                    (send! ch (sse-event evt-name fragment)))
+                  (catch Exception e
+                    (log/error e "SSE wiggum pause replay error")))))
             (go-loop []
               (when-let [event (<! tap-ch)]
                 (try

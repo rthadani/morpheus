@@ -90,11 +90,29 @@
       (when-let [v (:verification ev)]
         (println (str "   verify: "
                       (if (zero? (:exit v)) "✓ passed"
-                          (str "✗ exit=" (:exit v)))))))
+                          (str "✗ exit=" (:exit v))))))
+      (when-let [r (:review ev)]
+        (println (str "   judge: score=" (:score r)
+                      "  rec="  (name (:recommendation r))
+                      (when-let [s (:summary r)] (str "  — " s))))
+        (doseq [v (:violations r)]
+          (println (str "     [" (name (:severity v)) "] " (:file v)
+                        " (" (name (:type v)) ") — " (:reason v))))))
 
     :run-paused
-    (println (str "\n⏸  Paused after iteration " (:iteration event)
-                  (if (:verified? event) "  ✓ verified" "  ✗ not verified")))
+    (do
+      (println (str "\n⏸  Paused after iteration " (:iteration event)
+                    (cond
+                      (:review-pause? event) "  ⚠ judge requested review"
+                      (:verified? event)     "  ✓ verified"
+                      :else                  "  ✗ not verified")))
+      (when-let [r (:review event)]
+        (println (str "   judge: score=" (:score r)
+                      "  rec="  (name (:recommendation r))
+                      (when-let [s (:summary r)] (str "  — " s))))
+        (doseq [v (:violations r)]
+          (println (str "     [" (name (:severity v)) "] " (:file v)
+                        " (" (name (:type v)) ") — " (:reason v))))))
 
     :provider-fallback
     (println (str "⚠  Rate limit — retrying with " (:fallback event)
@@ -164,17 +182,12 @@
                                (do (print "Feedback: ") (flush) (read-line)))})
                 (recur))
 
-              ;; Wiggum pause — ask human to step / retry / abort
+              ;; Wiggum pause — resume is driven by the web UI dialog; the CLI
+              ;; just keeps consuming events. The print-event handler already
+              ;; rendered the pause details and review above.
               :run-paused
-              (let [action (prompt! "step / retry / abort")]
-                (if (= :abort action)
-                  (do (wiggum/resume! run {:action :abort}) :aborted)
-                  (let [feedback (do (print "Feedback (optional, enter to skip): ")
-                                     (flush)
-                                     (let [fb (str/trim (or (read-line) ""))]
-                                       (when (seq fb) fb)))]
-                    (wiggum/resume! run {:action action :feedback feedback})
-                    (recur))))
+              (do (println "   → respond in the UI to continue or restore")
+                  (recur))
 
               ;; Terminal events — stop looping and return result
               :run-complete :ok

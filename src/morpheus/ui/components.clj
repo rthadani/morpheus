@@ -238,6 +238,33 @@
    "← Select an iteration"])
 
 ;; ──────────────────────────────────────────
+;; Wiggum — judge review block
+;; ──────────────────────────────────────────
+
+(defn judge-review-block
+  "Renders the judge's score, recommendation, summary, and violation list.
+   Designed to sit inside .review-panel between .review-header and .review-form."
+  [review]
+  (when review
+    (let [{:keys [score recommendation summary violations]} review
+          rec-name (name (or recommendation :continue))]
+      [:div.review-judge
+       [:div.review-judge-top
+        [:span.review-score (str "score " (or score "?") "/10")]
+        [:span {:class (str "review-rec review-rec-" rec-name)} rec-name]
+        (when summary
+          [:span.review-summary-text summary])]
+       (when (seq violations)
+         [:ul.review-violations
+          (for [{:keys [file type severity reason]} violations]
+            [:li.review-violation
+             [:span {:class (str "sev sev-" (name (or severity :low)))}
+              (name (or severity :low))]
+             (when (seq file) [:span.review-v-file file])
+             [:span.review-v-type (name (or type :other))]
+             [:span.review-v-reason reason]])])])))
+
+;; ──────────────────────────────────────────
 ;; Wiggum — control packet (right panel)
 ;; ──────────────────────────────────────────
 
