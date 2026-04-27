@@ -141,6 +141,16 @@
 
     nil))
 
+(defn- with-attr
+  "Adds an attribute to a hiccup vector whether or not it already has an
+   explicit attr map at index 1. Lets us tag a component returned by another
+   namespace with hx-swap-oob without forcing every component to declare an
+   empty {} attr map."
+  [[tag & body :as h] k v]
+  (if (map? (first body))
+    (apply vector tag (assoc (first body) k v) (rest body))
+    (apply vector tag {k v} body)))
+
 ;; ──────────────────────────────────────────
 ;; SSE — Wiggum run fragments
 ;; ──────────────────────────────────────────
@@ -156,16 +166,20 @@
 
     :iteration-started
     (str (h/html
-           [:div {:hx-swap-oob "outerHTML:#control-packet-panel"}
-            (ui/control-packet-panel (:control-packet event))])
+           ;; hx-swap-oob applied directly to the panel's root element so the
+           ;; outerHTML swap doesn't create a wrapper-and-nested duplicate id.
+           (with-attr (ui/control-packet-panel (:control-packet event))
+                      :hx-swap-oob "outerHTML"))
          ;; replace the running-row placeholder (always present in DOM)
          (h/html
-           (update (ui/iteration-running-row run-id (:iteration event))
-                   1 assoc :hx-swap-oob "outerHTML:#iter-row-running"))
-         ;; auto-show live output in the detail panel immediately
+           (with-attr (ui/iteration-running-row run-id (:iteration event))
+                      :hx-swap-oob "outerHTML"))
+         ;; auto-show live output in the detail panel immediately —
+         ;; same direct-attr pattern, otherwise we end up with nested
+         ;; #wg-detail elements after the first iteration.
          (h/html
-           [:div {:id "wg-detail" :hx-swap-oob "outerHTML:#wg-detail"}
-            (ui/iteration-live-panel (:iteration event))])
+           (with-attr (ui/iteration-live-panel (:iteration event))
+                      :hx-swap-oob "outerHTML"))
          (h/html
            [:div {:id "log-tail" :hx-swap-oob "beforeend"}
             (ui/log-line :info (str "→ iteration " (:iteration event) " started"))]))

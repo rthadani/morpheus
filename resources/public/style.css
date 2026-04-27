@@ -210,6 +210,7 @@ body { background: var(--bg3); overflow: hidden; }
 .files-edit { font-size: 10px; color: var(--blue);  }
 
 /* ── Iteration detail ── */
+.iter-detail { flex-shrink: 0; }
 .iter-detail-placeholder {
   color: var(--text3); font-size: 12px;
   display: flex; align-items: center; justify-content: center;
