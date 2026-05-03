@@ -132,8 +132,7 @@ or `:supervisor-model-config` to override one side.
  :success-check "clj -M:test"
  :model-config
  {:provider :ollama
-  :model-id "qwen2.5-coder:32b"   ; required — pulled on first use
-  :temperature 0.2}}
+  :model-id "qwen2.5-coder:32b"}}   ; required — pulled on first use
 ```
 
 Requires the `ollama` CLI on `PATH`. The model is pulled the first time it runs.

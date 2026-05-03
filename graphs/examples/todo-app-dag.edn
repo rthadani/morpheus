@@ -25,9 +25,7 @@
   :html        "hiccup2 + htmx"}
 
  :graph/default-model
- {:model-id    "claude-haiku-4-5-20251001"
-  :temperature 0.2
-  :max-tokens  8192}
+ {:model-id "claude-haiku-4-5-20251001"}
 
  :graph/nodes
  [;; ── 1. Scaffold ──────────────────────────────────────────────────────────

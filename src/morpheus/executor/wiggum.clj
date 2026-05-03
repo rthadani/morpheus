@@ -444,10 +444,8 @@
         objective (:objective config)
         top       (top-level-summary work-dir)
         tree      (dir-tree work-dir)
-        model-cfg (merge {:model-id    (or (get-in config [:supervisor-model-config :model-id])
-                                           "claude-haiku-4-5-20251001")
-                          :max-tokens  4096
-                          :temperature 0.2}
+        model-cfg (merge {:model-id (or (get-in config [:supervisor-model-config :model-id])
+                                        "claude-haiku-4-5-20251001")}
                          (select-keys (or (:supervisor-model-config config) {})
                                       [:provider :base-url]))
         prompt    (str/join "\n\n"

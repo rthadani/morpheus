@@ -22,10 +22,8 @@
 ;; ──────────────────────────────────────────
 
 (def default-model-config
-  {:model-id    "claude-haiku-4-5-20251001"
-   :max-tokens  2048
-   :temperature 0.2
-   :system      nil})  ; overridden below
+  {:model-id "claude-haiku-4-5-20251001"
+   :system   nil})  ; overridden below
 
 ;; ──────────────────────────────────────────
 ;; Prompt construction
