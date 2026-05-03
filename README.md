@@ -110,6 +110,58 @@ clj -M:nrepl   # nREPL on port 7888
  :step-once?    false}
 ```
 
+## Model providers
+
+The supervisor LLM (and any `:executor :llm` nodes) dispatch on `:provider` in
+`:model-config`. All providers shell out to the `claude` CLI — non-Anthropic
+providers just point `claude` at an Anthropic-compatible endpoint.
+
+| Provider   | How it runs                                            | Required env       |
+|------------|--------------------------------------------------------|--------------------|
+| `:claude`  | `claude --print` against api.anthropic.com (default)   | `ANTHROPIC_API_KEY`|
+| `:ollama`  | `ollama launch claude` — auto-starts server, auto-pulls model | none (local)|
+| `:kimi`    | `claude --print` against api.moonshot.ai/anthropic     | `MOONSHOT_API_KEY` |
+
+`:model-config` sets both executor and supervisor; use `:executor-model-config`
+or `:supervisor-model-config` to override one side.
+
+### Ollama (local)
+
+```clojure
+{:objective     "..."
+ :success-check "clj -M:test"
+ :model-config
+ {:provider :ollama
+  :model-id "qwen2.5-coder:32b"   ; required — pulled on first use
+  :temperature 0.2}}
+```
+
+Requires the `ollama` CLI on `PATH`. The model is pulled the first time it runs.
+
+### Kimi (Moonshot)
+
+```clojure
+{:objective     "..."
+ :success-check "clj -M:test"
+ :model-config
+ {:provider :kimi
+  :model-id "kimi-k2.5"                              ; default
+  :base-url "https://api.moonshot.ai/anthropic"}}    ; default
+```
+
+```bash
+export MOONSHOT_API_KEY=sk-...
+```
+
+### Mixed setup
+
+Run the supervisor on a cheap local model and the executor on Claude:
+
+```clojure
+{:executor-model-config   {:provider :claude :model-id "claude-haiku-4-5-20251001"}
+ :supervisor-model-config {:provider :ollama :model-id "llama3.1:8b"}}
+```
+
 ## Node types
 
 | Type           | Executor         | Use for                                    |

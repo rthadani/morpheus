@@ -1,39 +1,67 @@
 (ns morpheus.executor.llm
   "LLM calls — dispatches on :provider in model-config.
-   :provider :claude  (default) — calls claude --print CLI
-   :provider :ollama             — calls Ollama HTTP API directly"
+   All providers shell out to the claude CLI; non-Anthropic providers just
+   override ANTHROPIC_BASE_URL/AUTH_TOKEN to point at an Anthropic-compatible
+   endpoint.
+   :provider :claude  (default) — claude --print against api.anthropic.com
+   :provider :ollama             — `ollama launch claude` (auto-starts server,
+                                   auto-pulls model)
+   :provider :kimi               — claude --print against api.moonshot.ai/anthropic
+                                   (reads key from MOONSHOT_API_KEY)"
   (:require
    [clojure.data.json   :as json]
    [clojure.java.shell  :as shell]
    [clojure.string      :as str]
-   [org.httpkit.client  :as http]
    [taoensso.timbre     :as log]))
 
 (def default-model "claude-haiku-4-5-20251001")
 
 (defn- complete-ollama
-  [{:keys [model-id base-url system temperature max-tokens]
-    :or   {base-url    "http://localhost:11434"
-           temperature 0.2
-           max-tokens  4096}}
-   prompt]
+  "Delegates to `ollama launch claude`, which auto-starts the local Ollama
+   server, pulls the model on first use, and sets the Anthropic-compatible
+   env vars before spawning claude."
+  [{:keys [model-id system]} prompt]
+  (when (str/blank? model-id)
+    (throw (ex-info "model-id required for :ollama provider" {:provider :ollama})))
   (let [full-prompt (if (seq system)
                       (str system "\n\n---\n\n" prompt)
                       prompt)
-        {:keys [status body error]}
-        @(http/post (str base-url "/api/generate")
-                    {:headers {"Content-Type" "application/json"}
-                     :body    (json/write-str {:model   model-id
-                                               :prompt  full-prompt
-                                               :stream  false
-                                               :options {:temperature temperature
-                                                         :num_predict max-tokens}})
-                     :timeout 300000})]
-    (when error
-      (throw (ex-info "Ollama connection error" {:cause error})))
-    (when (>= status 400)
-      (throw (ex-info "Ollama error" {:status status :body body})))
-    (-> body (json/read-str :key-fn keyword) :response str/trim)))
+        args        ["ollama" "launch" "claude" "--model" model-id "--yes"
+                     "--" "--print" "--dangerously-skip-permissions"]
+        result      (apply shell/sh (concat args [:in full-prompt]))]
+    (when (pos? (:exit result))
+      (throw (ex-info "ollama launch claude error"
+                      {:exit (:exit result) :stderr (:err result)})))
+    (str/trim (:out result))))
+
+(defn- complete-kimi
+  [{:keys [model-id base-url system]
+    :or   {model-id "kimi-k2.5"
+           base-url "https://api.moonshot.ai/anthropic"}}
+   prompt]
+  (let [api-key (System/getenv "MOONSHOT_API_KEY")]
+    (when (str/blank? api-key)
+      (throw (ex-info "MOONSHOT_API_KEY env var not set" {:provider :kimi}))))
+  (let [full-prompt (if (seq system)
+                      (str system "\n\n---\n\n" prompt)
+                      prompt)
+        env         (-> (into {} (System/getenv))
+                        (assoc "ANTHROPIC_BASE_URL"             base-url
+                               "ANTHROPIC_AUTH_TOKEN"           (System/getenv "MOONSHOT_API_KEY")
+                               "ANTHROPIC_API_KEY"              ""
+                               "ANTHROPIC_MODEL"                model-id
+                               "ANTHROPIC_DEFAULT_OPUS_MODEL"   model-id
+                               "ANTHROPIC_DEFAULT_SONNET_MODEL" model-id
+                               "ANTHROPIC_DEFAULT_HAIKU_MODEL"  model-id
+                               "CLAUDE_CODE_SUBAGENT_MODEL"     model-id
+                               "ENABLE_TOOL_SEARCH"             "false"))
+        args        (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
+                      model-id (concat ["--model" model-id]))
+        result      (apply shell/sh (concat args [:in full-prompt :env env]))]
+    (when (pos? (:exit result))
+      (throw (ex-info "claude CLI error (kimi)"
+                      {:exit (:exit result) :stderr (:err result)})))
+    (str/trim (:out result))))
 
 (defn- complete-claude
   [{:keys [model-id system]
@@ -50,13 +78,17 @@
     (str/trim (:out result))))
 
 (defn complete
-  "Calls the appropriate LLM backend based on :provider in model-config.
-   :provider :ollama  — Ollama HTTP API (default base-url: http://localhost:11434)
-   :provider :claude  — claude --print CLI (default, used when :provider is absent)"
+  "Calls claude --print, optionally routed through a non-Anthropic backend.
+   :provider :ollama  — via `ollama launch claude` (requires ollama CLI;
+                        :model-id required, model auto-pulled)
+   :provider :kimi    — routes through Moonshot's Anthropic-compatible API
+                        (reads MOONSHOT_API_KEY from environment)
+   :provider :claude  — talks to api.anthropic.com (default)"
   [{:keys [provider model-id] :as model-config} prompt]
   (log/debug "LLM call" {:provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
-  (if (= provider :ollama)
-    (complete-ollama model-config prompt)
+  (case provider
+    :ollama (complete-ollama model-config prompt)
+    :kimi   (complete-kimi   model-config prompt)
     (complete-claude model-config prompt)))
 
 (defn- extract-json-object
