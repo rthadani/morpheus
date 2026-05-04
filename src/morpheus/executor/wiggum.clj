@@ -15,7 +15,8 @@
      :model-config            optional  — LLM for executor + supervisor
      :executor-model-config   optional  — overrides for executor only
      :supervisor-model-config optional  — overrides for supervisor only
-     :generate-claude-md?     optional  — write a project CLAUDE.md after success"
+     :generate-claude-md?     optional  — write a project CLAUDE.md after success
+                                          (default true; pass false to skip)"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
    [clojure.edn                 :as edn]
@@ -430,7 +431,7 @@
 
 (defn- finish-run! [run run-config work-dir reason iteration]
   (set-state! run :done)
-  (when (:generate-claude-md? run-config)
+  (when (:generate-claude-md? run-config true)
     (generate-project-claude-md! run work-dir))
   (store/persist-run! run)
   (emit! run {:type :run-complete :reason reason :iteration iteration}))
