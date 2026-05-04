@@ -533,14 +533,14 @@
                   (next-packet-after-step run run-config control-packet
                                           initial-state action)]))))
 
-(defn- await-resume! [run iteration ctx]
+(defn- emit-pause!
+  "Marks the run paused and announces it. The actual `<! resume-ch` happens
+   inline in execute! — `<!` only works lexically inside (go ...)."
+  [run iteration ctx]
   (set-state! run :paused)
   (emit! run (merge {:type :run-paused :iteration iteration}
                     (select-keys ctx [:verified? :milestone? :phase-ended?
-                                      :review :review-pause?])))
-  (let [action (<! (:resume-ch run))]
-    (set-state! run :running)
-    action))
+                                      :review :review-pause?]))))
 
 (defn execute!
   "Starts the Wiggum loop in a go-block. Returns the run map immediately.
@@ -578,13 +578,16 @@
                                            (git-commit-phase! work-dir iteration)))]
                 (cond
                   (:pause? ctx)
-                  (let [action  (await-resume! run iteration ctx)
-                        outcome (apply-resume-action action run run-config work-dir
-                                                     iteration control-packet
-                                                     initial-state ctx commit-phase!)]
-                    (case (first outcome)
-                      :recur (recur (nth outcome 1) (nth outcome 2))
-                      :done  nil))
+                  (do
+                    (emit-pause! run iteration ctx)
+                    (let [action  (<! (:resume-ch run))
+                          _       (set-state! run :running)
+                          outcome (apply-resume-action action run run-config work-dir
+                                                       iteration control-packet
+                                                       initial-state ctx commit-phase!)]
+                      (case (first outcome)
+                        :recur (recur (nth outcome 1) (nth outcome 2))
+                        :done  nil)))
 
                   (:verified? ctx)
                   (do (commit-phase!)
