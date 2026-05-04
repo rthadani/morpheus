@@ -612,6 +612,92 @@
 ;; Main loop
 ;; ──────────────────────────────────────────
 
+(defn- iteration-context
+  "Collapses post-iteration evidence + run-config into a single decision map.
+   Used by the loop to choose between pausing and auto-continuing."
+  [run run-config ev iteration]
+  (let [verified?        (verification-passed? (:verification ev))
+        checkpoint-every (:checkpoint-every run-config)
+        milestone-hit?   (and checkpoint-every
+                              (zero? (mod iteration checkpoint-every)))
+        phase-ended?     (boolean (:phase-ended? ev))
+        review           (:review ev)
+        review-threshold (or (:review-threshold run-config) :high)
+        review-pause?    (and phase-ended?
+                              (judge/requires-pause? review review-threshold))]
+    {:verified?     verified?
+     :phase-ended?  phase-ended?
+     :milestone?    milestone-hit?
+     :review        review
+     :review-pause? review-pause?
+     :pause?        (or (:step-once? @(:control run)) milestone-hit? review-pause?)}))
+
+(defn- merge-steer+feedback
+  "Combines optional human feedback (from :step action) with any pending steer."
+  [feedback steer]
+  (cond (and feedback steer) (str feedback "\n\n" steer)
+        feedback             feedback
+        steer                steer
+        :else                nil))
+
+(defn- next-packet-after-step
+  "Builds the next control packet after a verified-but-not-done :step action,
+   merging supervisor review with any human feedback / steer."
+  [run run-config control-packet initial-state action]
+  (build-next-packet run-config control-packet
+                     (recent-evidence (:iterations run) 3)
+                     (merge-steer+feedback
+                       (when (seq (:feedback action)) (:feedback action))
+                       (consume-steer! run))
+                     initial-state))
+
+(defn- apply-resume-action
+  "Interprets a human resume action and returns one of:
+     [:recur iteration control-packet]   ; loop should recur with these values
+     [:done]                              ; loop should exit (run finished/aborted)
+   The loop body translates these into actual recur or termination — only the
+   loop can call recur in tail position."
+  [action run run-config work-dir iteration control-packet initial-state ctx commit-phase!]
+  (case (:action action)
+    :abort
+    (do (set-state! run :aborted)
+        (emit! run {:type :run-aborted})
+        [:done])
+
+    ;; :restore — judge says this phase did damage; roll back to the previous
+    ;; accepted state and re-enter the phase.
+    :restore
+    (do (git-restore! work-dir)
+        [:recur iteration control-packet])
+
+    :retry
+    [:recur iteration control-packet]
+
+    :retry-with-overrides
+    [:recur iteration (merge control-packet (:overrides action))]
+
+    ;; :step — verified = done; otherwise advance with merged steer/feedback
+    (if (:verified? ctx)
+      (do (commit-phase!)
+          (finish-run! run run-config work-dir :verified iteration)
+          [:done])
+      (do (commit-phase!)
+          [:recur (inc iteration)
+                  (next-packet-after-step run run-config control-packet
+                                          initial-state action)]))))
+
+(defn- await-resume!
+  "Marks run paused, emits :run-paused with ctx fields, blocks on resume-ch.
+   Returns the resume action and flips state back to :running."
+  [run iteration ctx]
+  (set-state! run :paused)
+  (emit! run (merge {:type :run-paused :iteration iteration}
+                    (select-keys ctx [:verified? :milestone? :phase-ended?
+                                      :review :review-pause?])))
+  (let [action (<! (:resume-ch run))]
+    (set-state! run :running)
+    action))
+
 (defn execute!
   "Starts the Wiggum loop in a go-block. Returns the run map immediately.
    Sends events to (:event-ch run) as iterations proceed.
@@ -624,7 +710,8 @@
    run-config: see namespace docstring for keys."
   [run-id run-config]
   (let [run      (create-run run-id run-config)
-        snapshot (load-snapshot run-config)]
+        snapshot (load-snapshot run-config)
+        max-iters (or (:max-iterations run-config) 20)]
     (go
       (set-state! run :running)
       (try
@@ -634,7 +721,7 @@
                  control-packet start-packet]
             (reset! (:control-packet run) control-packet)
             (cond
-              (> iteration (or (:max-iterations run-config) 20))
+              (> iteration max-iters)
               (do (set-state! run :done)
                   (emit! run {:type :run-complete :reason :max-iterations
                               :iterations (dec iteration)}))
@@ -643,78 +730,34 @@
               (emit! run {:type :run-aborted :run-id run-id})
 
               :else
-              (let [ev               (run-iteration! run work-dir iteration control-packet)
-                    _                (swap! (:iterations run) conj ev)
-                    _                (write-snapshot! run)
-                    _                (store/persist-run! run)
-                    verified?        (verification-passed? (:verification ev))
-                    checkpoint-every (:checkpoint-every run-config)
-                    milestone-hit?   (and checkpoint-every
-                                          (zero? (mod iteration checkpoint-every)))
-                    phase-ended?     (boolean (:phase-ended? ev))
-                    review           (:review ev)
-                    review-threshold (or (:review-threshold run-config) :high)
-                    review-pause?    (and phase-ended?
-                                          (judge/requires-pause? review review-threshold))
-                    commit-phase!    (fn [] (when phase-ended? (git-commit-phase! work-dir iteration)))]
+              (let [ev (run-iteration! run work-dir iteration control-packet)
+                    _  (swap! (:iterations run) conj ev)
+                    _  (write-snapshot! run)
+                    _  (store/persist-run! run)
+                    ctx (iteration-context run run-config ev iteration)
+                    commit-phase! (fn [] (when (:phase-ended? ctx)
+                                           (git-commit-phase! work-dir iteration)))]
+                (cond
+                  (:pause? ctx)
+                  (let [action  (await-resume! run iteration ctx)
+                        outcome (apply-resume-action action run run-config work-dir
+                                                     iteration control-packet
+                                                     initial-state ctx commit-phase!)]
+                    (case (first outcome)
+                      :recur (recur (nth outcome 1) (nth outcome 2))
+                      :done  nil))
 
-                (if (or (:step-once? @(:control run)) milestone-hit? review-pause?)
+                  (:verified? ctx)
+                  (do (commit-phase!)
+                      (finish-run! run run-config work-dir :verified iteration))
 
-                  ;; ── pause for human review ──────────────────
-                  (do
-                    (set-state! run :paused)
-                    (emit! run {:type          :run-paused
-                                :iteration     iteration
-                                :verified?     verified?
-                                :milestone?    milestone-hit?
-                                :phase-ended?  phase-ended?
-                                :review        review
-                                :review-pause? review-pause?})
-                    (let [action (<! (:resume-ch run))]
-                      (set-state! run :running)
-                      (case (:action action)
-                        :abort
-                        (do (set-state! run :aborted)
-                            (emit! run {:type :run-aborted}))
-
-                        ;; :restore — judge says this phase did damage; roll back
-                        ;; to the previous accepted state and re-enter the phase.
-                        :restore
-                        (do (git-restore! work-dir)
-                            (recur iteration control-packet))
-
-                        :retry
-                        (recur iteration control-packet)
-
-                        :retry-with-overrides
-                        (recur iteration (merge control-packet (:overrides action)))
-
-                        ;; :step — verified = done; otherwise call supervisor
-                        (if verified?
-                          (do (commit-phase!)
-                              (finish-run! run run-config work-dir :verified iteration))
-                          (let [steer  (consume-steer! run)
-                                fb     (when (seq (:feedback action)) (:feedback action))
-                                merged (cond (and fb steer) (str fb "\n\n" steer)
-                                             fb             fb
-                                             steer          steer
-                                             :else          nil)]
-                            (commit-phase!)
-                            (recur (inc iteration)
-                                   (build-next-packet run-config control-packet
-                                                      (recent-evidence (:iterations run) 3)
-                                                      merged initial-state)))))))
-
-                  ;; ── auto-continue ───────────────────────────
-                  (if verified?
-                    (do (commit-phase!)
-                        (finish-run! run run-config work-dir :verified iteration))
-                    (do (commit-phase!)
-                        (recur (inc iteration)
-                               (build-next-packet run-config control-packet
-                                                  (recent-evidence (:iterations run) 3)
-                                                  (consume-steer! run)
-                                                  initial-state)))))))))
+                  :else
+                  (do (commit-phase!)
+                      (recur (inc iteration)
+                             (build-next-packet run-config control-packet
+                                                (recent-evidence (:iterations run) 3)
+                                                (consume-steer! run)
+                                                initial-state))))))))
 
         (catch Exception e
           (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
