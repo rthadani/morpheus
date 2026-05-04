@@ -194,30 +194,30 @@
                                         (recur (.readLine rdr)))))))
                           (.setDaemon true)
                           .start)]
-    (let [result-text (atom nil)
-          cost-usd    (atom nil)]
-      (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
-        (loop [line (.readLine rdr)]
-          (when line
-            (.append stdout-buf line)
-            (.append stdout-buf "\n")
-            (let [parsed (parse-stream-line line)]
-              (when-let [r (:result parsed)]   (reset! result-text r))
-              (when-let [c (:cost-usd parsed)] (reset! cost-usd c))
-              (when (and on-output (:activity parsed))
-                (on-output (:activity parsed))))
-            (recur (.readLine rdr)))))
+    (let [[result-text cost-usd]
+          (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
+            (loop [line (.readLine rdr) result nil cost nil]
+              (if-not line
+                [result cost]
+                (let [parsed (parse-stream-line line)]
+                  (.append stdout-buf line)
+                  (.append stdout-buf "\n")
+                  (when (and on-output (:activity parsed))
+                    (on-output (:activity parsed)))
+                  (recur (.readLine rdr)
+                         (or (:result parsed) result)
+                         (or (:cost-usd parsed) cost))))))]
       (.join stderr-thread)
       (let [exited?   (.waitFor process (quot timeout-ms 1000) java.util.concurrent.TimeUnit/SECONDS)
             _         (when-not exited? (.destroyForcibly process))
             exit-code (if exited? (.exitValue process) 1)
-            stdout    (or @result-text (str stdout-buf))
+            stdout    (or result-text (str stdout-buf))
             stderr    (str stderr-buf)
             duration-ms (- (System/currentTimeMillis) started-at)
             after-snapshot (snapshot-files work-dir)]
         (log/info "Claude Code run complete"
                   {:exit exit-code :out-chars (count stdout) :duration-ms duration-ms
-                   :cost-usd @cost-usd})
+                   :cost-usd cost-usd})
         (when (not (str/blank? stderr))
           (log/warn "Claude Code stderr" stderr))
         {:stdout          stdout
@@ -229,7 +229,7 @@
          :started-at      started-at
          :duration-ms     duration-ms
          :prompt-chars    (count prompt)
-         :cost-usd        @cost-usd
+         :cost-usd        cost-usd
          :model           model
          :provider        (name provider)
          :work-dir        work-dir}))))
