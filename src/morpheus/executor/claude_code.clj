@@ -140,18 +140,60 @@
 (defn claude-available? []
   (zero? (:exit (shell/sh "which" "claude"))))
 
+(defn- build-cmd+env
+  "Returns {:cmd [...] :env-overrides {string string}} for the given provider.
+   Mirrors morpheus.executor.llm dispatch so the executor can run against
+   non-Anthropic Anthropic-compatible backends."
+  [{:keys [provider base-url] :or {provider :claude}} model auto? prompt]
+  (let [claude-args (cond-> ["--print" "--verbose"
+                             "--output-format" "stream-json"]
+                      model (concat ["--model" model])
+                      auto? (concat ["--dangerously-skip-permissions"])
+                      true  (concat [prompt])
+                      true  vec)]
+    (case provider
+      :ollama
+      (do
+        (when (str/blank? model)
+          (throw (ex-info ":model required for :ollama provider" {:provider :ollama})))
+        {:cmd (vec (concat ["ollama" "launch" "claude" "--model" model "--yes" "--"]
+                           claude-args))
+         :env-overrides {}})
+
+      :kimi
+      (let [api-key (System/getenv "MOONSHOT_API_KEY")]
+        (when (str/blank? api-key)
+          (throw (ex-info "MOONSHOT_API_KEY env var not set" {:provider :kimi})))
+        {:cmd (vec (cons "claude" claude-args))
+         :env-overrides {"ANTHROPIC_BASE_URL"             (or base-url "https://api.moonshot.ai/anthropic")
+                         "ANTHROPIC_AUTH_TOKEN"           api-key
+                         "ANTHROPIC_API_KEY"              ""
+                         "ANTHROPIC_MODEL"                (or model "")
+                         "ANTHROPIC_DEFAULT_OPUS_MODEL"   (or model "")
+                         "ANTHROPIC_DEFAULT_SONNET_MODEL" (or model "")
+                         "ANTHROPIC_DEFAULT_HAIKU_MODEL"  (or model "")
+                         "CLAUDE_CODE_SUBAGENT_MODEL"     (or model "")
+                         "ENABLE_TOOL_SEARCH"             "false"}})
+
+      ;; :claude or anything else → vanilla Anthropic
+      {:cmd (vec (cons "claude" claude-args))
+       :env-overrides {}})))
+
 (defn run!
   "Runs Claude Code non-interactively in work-dir.
    Streams stdout line-by-line via on-output callback as the process runs.
 
    Options:
-     :work-dir    required — directory CC runs in
-     :prompt      required — task instruction
-     :timeout-ms  optional — default 300000
-     :project-dir optional — path copied into work-dir before run
-     :model       optional — model id string passed via --model flag
-     :auto?       optional — skip all permission prompts (default true)
-     :on-output   optional — (fn [line]) called for each stdout line in real-time
+     :work-dir     required — directory CC runs in
+     :prompt       required — task instruction
+     :timeout-ms   optional — default 300000
+     :project-dir  optional — path copied into work-dir before run
+     :model        optional — model id string passed via --model flag
+     :model-config optional — {:provider :claude|:kimi|:ollama :base-url ...}
+                              dispatches the executor backend the same way
+                              morpheus.executor.llm/complete does
+     :auto?        optional — skip all permission prompts (default true)
+     :on-output    optional — (fn [line]) called for each stdout line in real-time
 
    Returns:
    {:stdout          <full output string>
@@ -163,11 +205,13 @@
     :started-at      <epoch ms>
     :duration-ms     <elapsed ms>
     :model           <model id or nil>
-    :provider        \"anthropic\"
+    :provider        <\"anthropic\" | \"kimi\" | \"ollama\">
     :work-dir        <working directory path>}"
-  [{:keys [work-dir prompt timeout-ms project-dir model auto? on-output]
+  [{:keys [work-dir prompt timeout-ms project-dir model model-config auto? on-output]
     :or   {timeout-ms 300000 auto? true}}]
   (log/info "Claude Code run starting" {:work-dir work-dir
+                                         :provider (or (:provider model-config) :claude)
+                                         :model    model
                                          :prompt-chars (count prompt)})
   (let [_ (when project-dir
             (shell/sh "sh" "-c"
@@ -175,20 +219,19 @@
                       :dir work-dir))
         before-snapshot (snapshot-files work-dir)
         started-at      (System/currentTimeMillis)
-        claude-cmd      (vec (concat ["claude" "--print" "--verbose"
-                                               "--output-format" "stream-json"]
-                                     (when model ["--model" model])
-                                     (when auto? ["--dangerously-skip-permissions"])
-                                     [prompt]))
+        provider        (or (:provider model-config) :claude)
+        {:keys [cmd env-overrides]} (build-cmd+env model-config model auto? prompt)
         ;; stdbuf forces line-buffered stdout so we get real-time output via pipe
         stdbuf?         (zero? (:exit (shell/sh "which" "stdbuf")))
         cmd             (if stdbuf?
-                          (vec (concat ["stdbuf" "-oL" "-eL"] claude-cmd))
-                          claude-cmd)
+                          (vec (concat ["stdbuf" "-oL" "-eL"] cmd))
+                          cmd)
         pb              (doto (ProcessBuilder. cmd)
                           (.directory (io/file work-dir))
                           (.redirectErrorStream false))
         _               (.putAll (.environment pb) (System/getenv))
+        _               (when (seq env-overrides)
+                          (.putAll (.environment pb) env-overrides))
         process         (.start pb)
         stdout-buf      (StringBuilder.)
         stderr-buf      (StringBuilder.)
@@ -243,7 +286,7 @@
          :prompt-chars    (count prompt)
          :cost-usd        @cost-usd
          :model           model
-         :provider        "anthropic"
+         :provider        (name provider)
          :work-dir        work-dir}))))
 
 ;; ──────────────────────────────────────────

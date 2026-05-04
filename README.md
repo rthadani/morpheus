@@ -154,12 +154,18 @@ export MOONSHOT_API_KEY=sk-...
 
 ### Mixed setup
 
-Run the supervisor on a cheap local model and the executor on Claude:
+Both `:executor-model-config` and `:supervisor-model-config` accept the same
+`:provider` dispatch — you can run the executor on Kimi and reason with Sonnet
+on the supervisor side, or any other split:
 
 ```clojure
-{:executor-model-config   {:provider :claude :model-id "claude-haiku-4-5-20251001"}
- :supervisor-model-config {:provider :ollama :model-id "llama3.1:8b"}}
+{:executor-model-config   {:provider :kimi   :model-id "kimi-k2.5"}
+ :supervisor-model-config {:provider :claude :model-id "claude-sonnet-4-6"}}
 ```
+
+If `:fallback-model` is set, it always runs against vanilla Anthropic — the
+executor's `:provider` is reset on rate-limit retry so a fallback id like
+`claude-haiku-4-5-20251001` doesn't get sent to e.g. Moonshot.
 
 ## Node types
 

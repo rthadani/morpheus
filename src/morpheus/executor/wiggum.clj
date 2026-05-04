@@ -281,6 +281,8 @@
   "Runs CC with the given opts. If the result looks like a rate-limit error and
    run-config has a :fallback-model, waits :fallback-delay-ms (default 30s)
    then retries once with the fallback model.
+   The fallback always runs against vanilla Anthropic — :model-config is
+   reset so we don't try the fallback id against e.g. Moonshot.
    Emits :provider-fallback event if the retry fires."
   [run opts run-config]
   (let [result (cc/run! opts)]
@@ -294,7 +296,7 @@
                       :fallback fb-model
                       :delay-ms delay-ms})
           (Thread/sleep delay-ms)
-          (cc/run! (assoc opts :model fb-model)))
+          (cc/run! (assoc opts :model fb-model :model-config nil)))
         (do
           (log/warn "Rate limit detected but no :fallback-model configured")
           result)))))
@@ -474,8 +476,9 @@
   [run work-dir iteration control-packet]
   (let [config        (:config run)
         timeout-ms    (:timeout-ms config 300000)
-        primary-model (or (get-in config [:executor-model-config :model-id])
-                          (get-in config [:model-config :model-id]))
+        exec-cfg      (or (:executor-model-config config)
+                          (:model-config config))
+        primary-model (:model-id exec-cfg)
         success-check (:success-check control-packet)
         ;; snapshot actual work-dir contents BEFORE running CC — injected into CLAUDE.md
         ;; so the executor sees exactly what exists and won't fabricate paths.
@@ -494,15 +497,16 @@
     ;; run Claude Code — no :project-dir (project copied at run start)
     (let [cc-result    (run-with-fallback!
                          run
-                         {:work-dir   work-dir
-                          :prompt     (:objective control-packet)
-                          :timeout-ms timeout-ms
-                          :model      primary-model
-                          :on-output  (fn [line]
-                                        (swap! (:live-output run) str line "\n")
-                                        (emit! run {:type      :output-line
-                                                    :iteration iteration
-                                                    :line      line}))}
+                         {:work-dir     work-dir
+                          :prompt       (:objective control-packet)
+                          :timeout-ms   timeout-ms
+                          :model        primary-model
+                          :model-config exec-cfg
+                          :on-output    (fn [line]
+                                          (swap! (:live-output run) str line "\n")
+                                          (emit! run {:type      :output-line
+                                                      :iteration iteration
+                                                      :line      line}))}
                          config)
           verification     (when success-check
                              (run-verification! work-dir success-check))

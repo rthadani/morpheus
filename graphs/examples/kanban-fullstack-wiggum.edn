@@ -6,49 +6,49 @@
 {:objective
  "Build and deploy a full-stack Kanban board application.
 
- === Phase 1: React frontend ===
- - Multiple named lists side-by-side (To Do, In Progress, Done)
- - Add, rename, delete lists
- - Add, edit, delete cards within any list
- - Drag-and-drop reorder using HTML5 DnD API (no DnD library)
- - Vitest + React Testing Library test suite covering all CRUD operations
+  === Phase 1: React frontend ===
+  - Multiple named lists side-by-side (To Do, In Progress, Done)
+  - Add, rename, delete lists
+  - Add, edit, delete cards within any list
+  - Drag-and-drop reorder using HTML5 DnD API (no DnD library)
+  - Vitest + React Testing Library test suite covering all CRUD operations
 
- === Phase 2: Node.js backend + SQLite ===
- - Express server in TypeScript on port 3001
- - SQLite database via better-sqlite3 (file: db/kanban.db)
- - DB schema: boards(id, name), lists(id, board_id, name, title, position),
- cards(id, list_id, title, description, position)
- - REST API:
- GET    /api/health
- GET    /api/boards/:id          — full board with lists and cards
- POST   /api/lists               — create list
- PATCH  /api/lists/:id           — rename or reposition
- DELETE /api/lists/:id
- POST   /api/cards               — create card
- PATCH  /api/cards/:id           — edit or move to different list
- DELETE /api/cards/:id
- - Set up the database correctly so that all the tables and colums exist
- - Frontend fetches from the API (no more localStorage)
- - Jest + supertest integration tests for all API endpoints
+  === Phase 2: Node.js backend + SQLite ===
+  - Express server in TypeScript on port 3001
+  - SQLite database via better-sqlite3 (file: db/kanban.db)
+  - DB schema: boards(id, name), lists(id, board_id, name, title, position),
+               cards(id, list_id, title, description, position)
+  - REST API:
+      GET    /api/health
+      GET    /api/boards/:id          — full board with lists and cards
+      POST   /api/lists               — create list
+      PATCH  /api/lists/:id           — rename or reposition
+      DELETE /api/lists/:id
+      POST   /api/cards               — create card
+      PATCH  /api/cards/:id           — edit or move to different list
+      DELETE /api/cards/:id
+  - Set up the database correctly so that all the tables and colums exist
+  - Frontend fetches from the API (no more localStorage)
+  - Jest + supertest integration tests for all API endpoints
 
- === Phase 3: Docker deploy ===
- - Multi-stage Dockerfile: stage 1 builds frontend, stage 2 is Express server
- that serves the built frontend as static files from /public
- - docker-compose.yml: single `app` service, port 3001:3001,
- named volume `kanban-data` mounted at /app/db for SQLite persistence
- - 
- - GET /api/health returns {status: ok, uptime: <seconds>}
- - `podman-compose up --build -d` starts cleanly
- - `curl http://localhost:3001/api/health` returns 200
- - `curl http://localhost:3001/` serves the React app HTML
+  === Phase 3: Docker deploy ===
+  - Multi-stage Dockerfile: stage 1 builds frontend, stage 2 is Express server
+    that serves the built frontend as static files from /public
+  - docker-compose.yml: single `app` service, port 3001:3001,
+    named volume `kanban-data` mounted at /app/db for SQLite persistence
+  - 
+  - GET /api/health returns {status: ok, uptime: <seconds>}
+  - `podman-compose up --build -d` starts cleanly
+  - `curl http://localhost:3001/api/health` returns 200
+  - `curl http://localhost:3001/` serves the React app HTML
 
- Stack: React 18, TypeScript 5, Vite 5, Express 4, better-sqlite3, Vitest,
- @testing-library/react, Jest, supertest, Docker.
+  Stack: React 18, TypeScript 5, Vite 5, Express 4, better-sqlite3, Vitest,
+  @testing-library/react, Jest, supertest, Docker.
 
- === Phase 4: Documentation ===
- - Create a README.md to make sure that describes the application as a summary
- - Provide instructions in the README.md to build and deploy the application
- - Update the Claude.md including any agents and skills that may be required to mantain the project in the future"
+  === Phase 4: Documentation ===
+  - Create a README.md to make sure that describes the application as a summary
+  - Provide instructions in the README.md to build and deploy the application
+  - Update the Claude.md including any agents and skills that may be required to mantain the project in the future"
 
  :project-dir nil
 

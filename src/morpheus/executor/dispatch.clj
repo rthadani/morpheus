@@ -49,12 +49,13 @@
           claude-md (cc/render-claude-md node inputs context)
           _         (cc/write-claude-md! work-dir claude-md)
           prompt    (ctx/render-prompt (:prompt node) inputs)
-          result    (cc/run! {:work-dir    work-dir
-                              :prompt      prompt
-                              :project-dir (:project-dir node)
-                              :timeout-ms  (:timeout-ms node 300000)
-                              :model       (:model node)
-                              :auto?       (get node :auto? true)
+          result    (cc/run! {:work-dir     work-dir
+                              :prompt       prompt
+                              :project-dir  (:project-dir node)
+                              :timeout-ms   (:timeout-ms node 300000)
+                              :model        (:model node)
+                              :model-config (:model-config node)
+                              :auto?        (get node :auto? true)
                               :on-output   (fn [line]
                                              (when-let [bufs (::output-buffers context)]
                                                (swap! bufs update (:id node) str line "\n"))

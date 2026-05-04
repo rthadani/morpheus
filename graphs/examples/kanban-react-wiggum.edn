@@ -53,7 +53,10 @@
  :fallback-model    "claude-haiku-4-5-20251001"
  :fallback-delay-ms 20000
 
- :model-config
- {:model-id    "claude-haiku-4-5-20251001"
-  :temperature 0.2
-  :max-tokens  8192}}
+ :executor-model-config
+ {:provider :kimi
+  :model-id "kimi-k2.5" }
+ 
+ ;; Supervisor uses Sonnet — must reason across phases and steer correctly
+ :supervisor-model-config
+ {:model-id "claude-sonnet-4-6"} }
