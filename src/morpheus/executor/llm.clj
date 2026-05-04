@@ -1,13 +1,10 @@
 (ns morpheus.executor.llm
-  "LLM calls — dispatches on :provider in model-config.
-   All providers shell out to the claude CLI; non-Anthropic providers just
-   override ANTHROPIC_BASE_URL/AUTH_TOKEN to point at an Anthropic-compatible
-   endpoint.
-   :provider :claude  (default) — claude --print against api.anthropic.com
-   :provider :ollama             — `ollama launch claude` (auto-starts server,
-                                   auto-pulls model)
-   :provider :kimi               — claude --print against api.moonshot.ai/anthropic
-                                   (reads key from MOONSHOT_API_KEY)"
+  "LLM calls — dispatches on :provider in model-config. All providers shell out
+   to the claude CLI; non-Anthropic providers just override env vars to point
+   at an Anthropic-compatible endpoint.
+     :claude  (default) — api.anthropic.com
+     :ollama            — `ollama launch claude` (auto-pulls model)
+     :kimi              — api.moonshot.ai/anthropic (reads MOONSHOT_API_KEY)"
   (:require
    [clojure.data.json   :as json]
    [clojure.java.shell  :as shell]
@@ -16,11 +13,7 @@
 
 (def default-model "claude-haiku-4-5-20251001")
 
-(defn- complete-ollama
-  "Delegates to `ollama launch claude`, which auto-starts the local Ollama
-   server, pulls the model on first use, and sets the Anthropic-compatible
-   env vars before spawning claude."
-  [{:keys [model-id system]} prompt]
+(defn- complete-ollama [{:keys [model-id system]} prompt]
   (when (str/blank? model-id)
     (throw (ex-info "model-id required for :ollama provider" {:provider :ollama})))
   (let [full-prompt (if (seq system)
@@ -79,11 +72,7 @@
 
 (defn complete
   "Calls claude --print, optionally routed through a non-Anthropic backend.
-   :provider :ollama  — via `ollama launch claude` (requires ollama CLI;
-                        :model-id required, model auto-pulled)
-   :provider :kimi    — routes through Moonshot's Anthropic-compatible API
-                        (reads MOONSHOT_API_KEY from environment)
-   :provider :claude  — talks to api.anthropic.com (default)"
+   Dispatches on :provider — :ollama, :kimi, or :claude (default)."
   [{:keys [provider model-id] :as model-config} prompt]
   (log/debug "LLM call" {:provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
   (case provider
@@ -92,9 +81,7 @@
     (complete-claude model-config prompt)))
 
 (defn- extract-json-object
-  "Extracts the first complete JSON object from text by finding the
-   outermost { ... } pair. Handles LLM responses that wrap JSON in prose
-   or markdown fences."
+  "Pulls the outermost { ... } from text — robust to prose or fences around it."
   [text]
   (let [start (.indexOf text "{")
         end   (.lastIndexOf text "}")]
@@ -103,8 +90,7 @@
       text)))
 
 (defn complete-json
-  "Like complete but extracts a JSON object from the response.
-   Returns parsed Clojure map. Robust to markdown fences and surrounding prose."
+  "Like complete but extracts a JSON object from the response and parses it."
   [model-config prompt]
   (let [json-prompt (str prompt "\n\nRespond with valid JSON only. No preamble, no markdown fences.")
         raw         (complete model-config json-prompt)

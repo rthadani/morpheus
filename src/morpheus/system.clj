@@ -8,16 +8,8 @@
    [morpheus.ui.router   :as router]
    [morpheus.executor.store :as store]))
 
-;; ──────────────────────────────────────────
-;; Config
-;; ──────────────────────────────────────────
-
 (defn read-config []
   (aero/read-config (io/resource "config.edn")))
-
-;; ──────────────────────────────────────────
-;; System atom + lifecycle
-;; ──────────────────────────────────────────
 
 (defonce system (atom nil))
 

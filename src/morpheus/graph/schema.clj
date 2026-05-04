@@ -1,21 +1,16 @@
 (ns morpheus.graph.schema
-  "EDN graph schema — pure data, no side effects.
-   A graph is a map with :graph/id, :graph/nodes, optional :graph/params.
-   Each node map is validated here.")
-
-;; ──────────────────────────────────────────
-;; Node types
-;; ──────────────────────────────────────────
+  "EDN graph schema — pure data. A graph is {:graph/id ... :graph/nodes [...]
+   :graph/params ...}; each node is validated here.")
 
 (def node-types
   #{:task          ; single LLM call
-    :planning      ; LLM call that produces keyed sections + optional proposed-nodes
-    :parallel      ; fan-out to N concurrent branches, fan-in with merge strategy
+    :planning      ; LLM call producing keyed sections + optional proposed-nodes
+    :parallel      ; fan-out to N branches, fan-in with merge strategy
     :checkpoint    ; suspends execution, waits for human action
     :graph-expand  ; calls expand-fn to splice new nodes into the live graph
-    :subgraph      ; runs a nested graph definition
-    :shell         ; executes a shell command
-    :http})        ; makes an HTTP request
+    :subgraph      ; runs a nested graph
+    :shell         ; shell command
+    :http})        ; http request
 
 (def checkpoint-actions
   #{:approve :revise :abort})
@@ -23,12 +18,7 @@
 (def merge-strategies
   #{:concat :vote :first :last})
 
-;; ──────────────────────────────────────────
-;; Constructors — build valid node maps
-;; ──────────────────────────────────────────
-
 (defn base-node
-  "Fields shared by all node types."
   [{:keys [id type depends-on hooks retry timeout-ms output-key]
     :or   {depends-on [] hooks {} retry {:max-attempts 1 :backoff-ms 0}}}]
   {:id          id
@@ -79,10 +69,6 @@
          {:graph  graph
           :inputs (or inputs {})}))
 
-;; ──────────────────────────────────────────
-;; Graph constructor
-;; ──────────────────────────────────────────
-
 (defn graph
   [{:keys [id version nodes params default-model context]
     :or   {version "1.0.0" params {} context {}}}]
@@ -92,10 +78,6 @@
    :graph/params        params
    :graph/default-model default-model
    :graph/context       context})
-
-;; ──────────────────────────────────────────
-;; Validation — returns nil if valid, error map if not
-;; ──────────────────────────────────────────
 
 (defn validate-node [node]
   (cond

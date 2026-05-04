@@ -1,7 +1,6 @@
 (ns morpheus.executor.store
-  "In-memory run store. Maps run-id → run map.
-   Supports both classic DAG runs (engine/execute!) and Wiggum runs (wiggum/execute!).
-   In production swap the atom for a durable store."
+  "In-memory run store. Maps run-id → run map; serves both DAG and Wiggum runs.
+   Swap the atom for a durable store in production."
   (:require
    [clojure.java.io    :as io]
    [clojure.edn        :as edn]
@@ -22,13 +21,9 @@
   (vals @store))
 
 (defn run-type
-  "Returns :wiggum for Wiggum iteration runs, :dag for classic graph runs."
+  "Returns :wiggum for Wiggum runs, :dag for classic graph runs."
   [run]
   (if (contains? run :iterations) :wiggum :dag))
-
-;; ──────────────────────────────────────────
-;; Summaries — plain maps, no atoms
-;; ──────────────────────────────────────────
 
 (defn- dag-summary [run]
   {:run-id     (:run-id run)
@@ -50,20 +45,15 @@
    :started-at     (:started-at run)})
 
 (defn run-summary
-  "Returns a plain map suitable for HTML rendering — no atoms.
-   Works for both DAG and Wiggum runs."
+  "Plain map for HTML rendering — no atoms. Works for DAG and Wiggum."
   [run]
   (case (run-type run)
     :wiggum (wiggum-summary run)
     :dag    (dag-summary run)))
 
-;; ──────────────────────────────────────────
-;; Persistence — project-dir/morpheus-ui-state.edn
-;; ──────────────────────────────────────────
-
 (defn persist-run!
-  "Saves a completed Wiggum run's summary alongside the snapshot in project-dir.
-   No-op when :project-dir is absent from config."
+  "Saves a Wiggum run summary to project-dir/morpheus-ui-state.edn.
+   No-op when :project-dir is absent."
   [run]
   (try
     (when-let [pd (get-in run [:config :project-dir])]
@@ -76,8 +66,8 @@
       (log/warn "Failed to persist UI state" {:message (ex-message e)}))))
 
 (defn- frozen-wiggum-run
-  "Reconstructs a read-only run map from a persisted summary so the page
-   renders correctly after a server restart. SSE channel is closed immediately."
+  "Reconstructs a read-only run from a persisted summary so the page renders
+   after a server restart. SSE channel is closed immediately."
   [summary]
   (let [noop-ch   (async/chan 1)
         noop-mult (async/mult noop-ch)]
@@ -97,8 +87,8 @@
      :event-log      (atom [])}))
 
 (defn load-ui-state!
-  "Loads a persisted UI state from project-dir/morpheus-ui-state.edn into the store.
-   Call this before starting a run to make the previous completed run visible."
+  "Loads project-dir/morpheus-ui-state.edn into the store so a previous run
+   stays visible after restart."
   [store project-dir]
   (try
     (let [path (str project-dir "/morpheus-ui-state.edn")
@@ -112,19 +102,14 @@
     (catch Exception e
       (log/warn "Failed to load UI state" {:project-dir project-dir :message (ex-message e)}))))
 
-;; ──────────────────────────────────────────
-;; Event log access
-;; ──────────────────────────────────────────
-
 (defn event-log
-  "Returns the full append-only event log for a Wiggum run.
-   Returns nil for DAG runs (which use a channel, not a log atom)."
+  "Append-only event log for a Wiggum run. Nil for DAG runs."
   [run]
   (when-let [log-atom (:event-log run)]
     @log-atom))
 
 (defn iterations
-  "Returns the vec of evidence maps for a Wiggum run, nil for DAG runs."
+  "Vec of evidence maps for a Wiggum run, nil for DAG runs."
   [run]
   (when-let [itr-atom (:iterations run)]
     @itr-atom))

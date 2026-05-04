@@ -4,14 +4,9 @@
    Usage:
      clj -M:run <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]
 
-   Run type is detected automatically:
-     EDN has :graph/nodes  → DAG executor  (engine/execute!)
-     EDN has :objective    → Wiggum loop   (wiggum/execute!)
+   Run type is auto-detected: :graph/nodes → DAG, :objective → Wiggum.
 
-   Exit codes:
-     0 — run completed successfully (verification passed or all nodes done)
-     1 — run aborted or verification failed
-     2 — unknown / timed out"
+   Exit codes: 0 success, 1 aborted/failed, 2 unknown."
   (:require
    [clojure.edn         :as edn]
    [clojure.string      :as str]
@@ -23,14 +18,7 @@
    [morpheus.system           :as sys])
   (:gen-class))
 
-;; ──────────────────────────────────────────
-;; Arg parsing
-;; ──────────────────────────────────────────
-
-(defn- parse-args
-  "Returns a map of options from CLI args.
-   Positional arg (no -- prefix) is treated as the EDN file path."
-  [args]
+(defn- parse-args [args]
   (loop [remaining (seq args) acc {}]
     (if (empty? remaining)
       acc
@@ -46,10 +34,6 @@
                                   (assoc acc :view-only? true))
         (recur (rest remaining) (assoc acc :edn-file (first remaining)))))))
 
-;; ──────────────────────────────────────────
-;; Run type detection
-;; ──────────────────────────────────────────
-
 (defn- detect-type [cfg]
   (cond
     (contains? cfg :graph/nodes) :dag
@@ -59,10 +43,6 @@
                         "  DAG graphs must have :graph/nodes\n"
                         "  Wiggum configs must have :objective")
                    {:keys (keys cfg)}))))
-
-;; ──────────────────────────────────────────
-;; Event printing
-;; ──────────────────────────────────────────
 
 (defn- print-event [event]
   (case (:type event)
@@ -138,30 +118,18 @@
     :run-error
     (println (str "\n💥 Run crashed — " (:message event)))
 
-    ;; suppress noisy low-level events
     (:state-change :control-changed) nil
 
     nil))
 
-;; ──────────────────────────────────────────
-;; Interactive prompts
-;; ──────────────────────────────────────────
-
-(defn- prompt!
-  "Prints msg, reads a line from stdin, returns it as a keyword."
-  [msg]
+(defn- prompt! [msg]
   (print (str msg ": "))
   (flush)
   (keyword (str/trim (or (read-line) "abort"))))
 
-;; ──────────────────────────────────────────
-;; Blocking event loop
-;; ──────────────────────────────────────────
-
 (defn- event-loop!
-  "Blocks the calling thread consuming events from a tap on (:event-mult run).
-   Using a tap (not reading event-ch directly) so the SSE mult also gets every event.
-   Returns :ok, :aborted, or :error."
+  "Blocks consuming events from a tap on (:event-mult run). Using a tap (not
+   event-ch directly) so the SSE mult sees every event too."
   [run rtype]
   (let [tap-ch (async/chan 128)]
     (async/tap (:event-mult run) tap-ch)
@@ -172,7 +140,6 @@
             (print-event event)
             (case (:type event)
 
-              ;; DAG checkpoint — ask human to approve / revise / abort
               :checkpoint
               (let [action (prompt! "approve / revise / abort")]
                 (engine/resume! run
@@ -182,30 +149,22 @@
                                (do (print "Feedback: ") (flush) (read-line)))})
                 (recur))
 
-              ;; Wiggum pause — resume is driven by the web UI dialog; the CLI
-              ;; just keeps consuming events. The print-event handler already
-              ;; rendered the pause details and review above.
+              ;; Wiggum pause is driven by the web UI dialog; the CLI just
+              ;; keeps consuming events.
               :run-paused
               (do (println "   → respond in the UI to continue or restore")
                   (recur))
 
-              ;; Terminal events — stop looping and return result
               :run-complete :ok
               :run-aborted  :aborted
               :run-error    :error
 
-              ;; All other events — keep looping
               (recur)))
 
-          ;; tap-ch closed (run channel closed) — treat as complete
           :ok))
       (finally
         (async/untap (:event-mult run) tap-ch)
         (async/close! tap-ch)))))
-
-;; ──────────────────────────────────────────
-;; Entry point
-;; ──────────────────────────────────────────
 
 (defn -main [& args]
   (let [{:keys [edn-file project-dir step-once? max-iterations view-only?]
@@ -240,7 +199,6 @@
 
       (println (str "Loading " edn-file " [" (name rtype) "]"))
 
-      ;; boot the HTTP server so the UI is reachable
       (sys/start!)
       (let [run-store (get-in @sys/system [:run-store])
             port      (or (some-> (System/getenv "PORT") parse-long) 7777)
@@ -260,13 +218,11 @@
                             (assoc :graph/params
                                    (assoc (:graph/params raw {}) :project-dir project-dir)))))
 
-            ;; register run so the UI can find it
             _         (store/add-run! run-store run)
             _         (println (str "UI → http://localhost:" port "/runs/" run-id))
             result    (event-loop! run rtype)
             work-dir  (when (= :wiggum rtype) @(:work-dir run))]
 
-        ;; copy generated files back to project-dir
         (when (and (= :ok result) project-dir work-dir)
           (let [dest (-> project-dir java.io.File. .getAbsolutePath)]
             (.mkdirs (java.io.File. dest))

@@ -1,7 +1,7 @@
 (ns morpheus.executor.claude-code
-  "Runs Claude Code as a subprocess for task and planning nodes.
-   Claude Code handles file I/O, bash, and codebase context natively —
-   the orchestrator just hands it a working directory and a CLAUDE.md."
+  "Runs Claude Code as a subprocess for task and planning nodes. CC handles
+   file I/O, bash, and codebase context — the orchestrator just hands it a
+   working directory and a CLAUDE.md."
   (:refer-clojure :exclude [run!])
   (:require
    [clojure.java.shell  :as shell]
@@ -14,22 +14,14 @@
    [java.nio.file.attribute FileAttribute]
    [java.io BufferedReader InputStreamReader]))
 
-;; ──────────────────────────────────────────
-;; Working directory management
-;; ──────────────────────────────────────────
-
 (defn make-work-dir!
-  "Creates a temp directory for a node's Claude Code session.
-   Returns the absolute path string."
+  "Creates a temp directory for a node's CC session. Returns absolute path."
   [run-id node-id]
   (let [prefix (str "morpheus-" (str run-id) "-" (name node-id) "-")
         path   (Files/createTempDirectory prefix (make-array FileAttribute 0))]
     (str path)))
 
-(defn list-written-files
-  "Returns seq of relative paths for all files under dir,
-   excluding CLAUDE.md and hidden files."
-  [dir]
+(defn list-written-files [dir]
   (->> (file-seq (io/file dir))
        (filter #(.isFile %))
        (map #(.getPath %))
@@ -38,8 +30,8 @@
        (map #(str/replace % (str dir "/") ""))))
 
 (defn snapshot-files
-  "Returns {relative-path -> last-modified-ms} for all non-hidden, non-CLAUDE.md
-   files under dir. Used by evidence/classify-changes to distinguish new vs edited files."
+  "Returns {relative-path -> last-modified-ms} for non-hidden, non-CLAUDE.md
+   files. Used by evidence/classify-changes to distinguish new vs edited."
   [dir]
   (let [base (io/file dir)]
     (->> (file-seq base)
@@ -50,22 +42,12 @@
                          [(str/replace (.getPath f) (str dir "/") "")
                           (.lastModified f)]))))))
 
-;; ──────────────────────────────────────────
-;; CLAUDE.md generation
-;; ──────────────────────────────────────────
-
-(defn write-claude-md!
-  "Writes a CLAUDE.md file into the working directory."
-  [work-dir content]
+(defn write-claude-md! [work-dir content]
   (spit (str work-dir "/CLAUDE.md") content))
 
 (defn render-claude-md
-  "Builds the CLAUDE.md string for a node from its config and resolved inputs.
-
-   :claude-md in the node can be:
-     - a plain string (used as-is, with {{slot}} interpolation)
-     - a keyword pointing to a context key that holds the md string
-     - nil (a minimal default is generated)"
+  "Builds the CLAUDE.md for a node. :claude-md may be a string (with {{slot}}
+   interpolation), a context keyword, or nil (a minimal default is generated)."
   [node inputs context]
   (let [template (cond
                    (string? (:claude-md node))
@@ -84,29 +66,21 @@
                         "\n\n"
                         "## Done when\n"
                         (or (:done-check node)
-                            "The task described above is complete.")))]
-    ;; interpolate {{slot}} placeholders from inputs
-    (let [rendered (reduce-kv
-                     (fn [s k v]
-                       (str/replace s
-                                    (re-pattern (str "\\{\\{" (name k) "\\}\\}"))
-                                    (str (or v ""))))
-                     template
-                     inputs)]
-      (if-let [steer (get context ::steer)]
-        (str rendered "\n\n## Human guidance\n\n" steer "\n")
-        rendered))))
-
-;; ──────────────────────────────────────────
-;; Stream-JSON parsing
-;; ──────────────────────────────────────────
+                            "The task described above is complete.")))
+        rendered (reduce-kv
+                   (fn [s k v]
+                     (str/replace s
+                                  (re-pattern (str "\\{\\{" (name k) "\\}\\}"))
+                                  (str (or v ""))))
+                   template
+                   inputs)]
+    (if-let [steer (get context ::steer)]
+      (str rendered "\n\n## Human guidance\n\n" steer "\n")
+      rendered)))
 
 (defn parse-stream-line
-  "Parses one stream-json line from claude --output-format stream-json.
-   Returns a map with:
-     :activity  — human-readable string of what CC just did (nil if nothing notable)
-     :result    — final text output (only present on the result line)
-     :cost-usd  — cost in USD (only present on the result line)"
+  "Parses one stream-json line. Returns {:activity :result :cost-usd} —
+   :result and :cost-usd only present on the final result line."
   [line]
   (try
     (let [ev (json/read-str line :key-fn keyword)]
@@ -133,17 +107,13 @@
         {}))
     (catch Exception _ {})))
 
-;; ──────────────────────────────────────────
-;; Claude Code invocation
-;; ──────────────────────────────────────────
-
 (defn claude-available? []
   (zero? (:exit (shell/sh "which" "claude"))))
 
 (defn- build-cmd+env
-  "Returns {:cmd [...] :env-overrides {string string}} for the given provider.
-   Mirrors morpheus.executor.llm dispatch so the executor can run against
-   non-Anthropic Anthropic-compatible backends."
+  "Returns {:cmd [...] :env-overrides {...}} for the given provider. Mirrors
+   morpheus.executor.llm dispatch so the executor can target non-Anthropic
+   Anthropic-compatible backends."
   [{:keys [provider base-url] :or {provider :claude}} model auto? prompt]
   (let [claude-args (cond-> ["--print" "--verbose"
                              "--output-format" "stream-json"]
@@ -175,44 +145,20 @@
                          "CLAUDE_CODE_SUBAGENT_MODEL"     (or model "")
                          "ENABLE_TOOL_SEARCH"             "false"}})
 
-      ;; :claude or anything else → vanilla Anthropic
       {:cmd (vec (cons "claude" claude-args))
        :env-overrides {}})))
 
 (defn run!
-  "Runs Claude Code non-interactively in work-dir.
-   Streams stdout line-by-line via on-output callback as the process runs.
-
-   Options:
-     :work-dir     required — directory CC runs in
-     :prompt       required — task instruction
-     :timeout-ms   optional — default 300000
-     :project-dir  optional — path copied into work-dir before run
-     :model        optional — model id string passed via --model flag
-     :model-config optional — {:provider :claude|:kimi|:ollama :base-url ...}
-                              dispatches the executor backend the same way
-                              morpheus.executor.llm/complete does
-     :auto?        optional — skip all permission prompts (default true)
-     :on-output    optional — (fn [line]) called for each stdout line in real-time
-
-   Returns:
-   {:stdout          <full output string>
-    :stderr          <stderr string>
-    :exit            <exit code>
-    :files-written   <seq of relative file paths — kept for DAG engine compat>
-    :before-snapshot <{path -> mtime} before CC ran>
-    :after-snapshot  <{path -> mtime} after CC finished>
-    :started-at      <epoch ms>
-    :duration-ms     <elapsed ms>
-    :model           <model id or nil>
-    :provider        <\"anthropic\" | \"kimi\" | \"ollama\">
-    :work-dir        <working directory path>}"
+  "Runs Claude Code non-interactively in work-dir, streaming stdout via
+   :on-output. :model-config dispatches the backend (:claude / :kimi / :ollama).
+   Returns a map with :stdout :stderr :exit :files-written :before-snapshot
+   :after-snapshot :duration-ms :model :provider :work-dir."
   [{:keys [work-dir prompt timeout-ms project-dir model model-config auto? on-output]
     :or   {timeout-ms 300000 auto? true}}]
   (log/info "Claude Code run starting" {:work-dir work-dir
-                                         :provider (or (:provider model-config) :claude)
-                                         :model    model
-                                         :prompt-chars (count prompt)})
+                                        :provider (or (:provider model-config) :claude)
+                                        :model    model
+                                        :prompt-chars (count prompt)})
   (let [_ (when project-dir
             (shell/sh "sh" "-c"
                       (str "cp -r " project-dir "/* " work-dir "/")
@@ -248,7 +194,6 @@
                                         (recur (.readLine rdr)))))))
                           (.setDaemon true)
                           .start)]
-    ;; read stdout line-by-line; parse stream-json for activity + final result
     (let [result-text (atom nil)
           cost-usd    (atom nil)]
       (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
@@ -289,14 +234,9 @@
          :provider        (name provider)
          :work-dir        work-dir}))))
 
-;; ──────────────────────────────────────────
-;; Plan mode — uses Claude Code's analysis without writing files
-;; ──────────────────────────────────────────
-
 (defn run-plan!
-  "Runs Claude Code in plan mode: analyses the codebase and returns
-   a structured plan without executing any writes.
-   Useful for :planning nodes that need real codebase context."
+  "Plan-mode: analyses the codebase and returns a structured plan without
+   writing any files. Used by :planning nodes."
   [{:keys [work-dir prompt project-dir timeout-ms]
     :or   {timeout-ms 120000}}]
   (log/info "Claude Code plan mode" {:work-dir work-dir})

@@ -1,11 +1,6 @@
 (ns morpheus.graphs.expanders
-  "Graph expansion functions. Called by :graph-expand nodes.
-   Pure functions — take inputs map, return seq of node definitions.
-   Each task node gets a :claude-md that scopes Claude Code to its job.")
-
-;; ──────────────────────────────────────────
-;; CLAUDE.md generators — one per task type
-;; ──────────────────────────────────────────
+  "Graph expansion functions called by :graph-expand nodes. Pure — take inputs,
+   return seq of node definitions. Each task gets a :claude-md scoped to its job.")
 
 (defn arch-claude-md [milestone-id brief project-dir]
   (str "# Task: architecture design — " (name milestone-id) "\n\n"
@@ -73,14 +68,7 @@
        "## Done when\n"
        "`clj -M:test` exits 0 and integration doc exists.\n"))
 
-;; ──────────────────────────────────────────
-;; Milestone subgraph
-;; ──────────────────────────────────────────
-
-(defn milestone-subgraph
-  "Returns the inner graph for a single milestone.
-   Each task node carries a :claude-md scoped to its job."
-  [milestone-id brief project-dir]
+(defn milestone-subgraph [milestone-id brief project-dir]
   {:graph/id    milestone-id
    :graph/nodes
    [{:id          :arch
@@ -123,16 +111,9 @@
      :prompt      "Review and fix integration points.\n\nThis milestone:\n{{impl}}\n\nPrior:\n{{prior}}"
      :output-key  :integrate/output}]})
 
-;; ──────────────────────────────────────────
-;; Expander — called by :graph-expand node
-;; ──────────────────────────────────────────
-
 (defn milestones->nodes
   "Expands planning sections into sequential subgraph + checkpoint pairs.
-
-   inputs map:
-     :plan        — planning node output {:sections {kw text} ...}
-     :project-dir — optional path to real codebase (forwarded to all task nodes)"
+   inputs: :plan {:sections {kw text}}, :project-dir (optional)."
   [{:keys [plan project-dir]} _context]
   (let [sections (:sections plan)]
     (:nodes

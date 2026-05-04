@@ -1,19 +1,15 @@
 (ns morpheus.executor.judge
-  "LLM-as-judge reviewer for Wiggum iterations.
+  "LLM-as-judge for Wiggum iterations. Inspects the git diff against the
+   previously-accepted state and scores it against the control packet's
+   expected-files, constraints, and anti-goals.
 
-   After the executor Claude Code subprocess finishes an iteration, the judge
-   inspects the git diff against the previously-accepted state and scores the
-   work against the control packet's expected-files, constraints, and anti-goals.
-
-   Returns a canonical review map:
-
+   Returns:
      {:score          0..10
       :recommendation :continue | :restore | :needs-review
       :summary        one-sentence quality call
       :violations     [{:file :type :severity :reason} ...]}
 
-   The main loop uses `requires-pause?` to decide whether to halt for human
-   input even when step-mode is off."
+   `requires-pause?` decides whether to halt for human input even in auto mode."
   (:require
    [clojure.string          :as str]
    [taoensso.timbre         :as log]
@@ -107,11 +103,7 @@
   (when v
     (-> v name str/lower-case (str/replace #"_" "-") keyword)))
 
-(defn- normalise-review
-  "Coerces raw JSON into a canonical review map with keyword severity /
-   recommendation. Guards against missing fields so a sloppy judge response
-   doesn't crash the loop."
-  [raw]
+(defn- normalise-review [raw]
   (let [rec (as-keyword (:recommendation raw))]
     {:score          (some-> (:score raw) int)
      :recommendation (if (#{:continue :restore :needs-review} rec) rec :continue)
@@ -127,18 +119,7 @@
 
 (defn review!
   "Runs the judge against one iteration. Returns a canonical review map or nil
-   on error (so the run keeps going even when the judge misbehaves).
-
-   ctx keys:
-     :objective      — overall goal string
-     :expected-files — vec of paths this iteration was supposed to produce
-     :constraints    — vec of constraint strings
-     :anti-goals     — vec of anti-goal strings
-     :files-written  — vec (from evidence)
-     :files-edited   — vec (from evidence)
-     :files-deleted  — vec (from evidence)
-     :success-check  — optional shell string for context
-     :diff           — raw git diff output for this iteration"
+   on error so the run keeps going when the judge misbehaves."
   [model-config ctx]
   (try
     (log/info "Judge reviewing iteration"
@@ -156,11 +137,8 @@
   (case s :high 3 :medium 2 :low 1 0))
 
 (defn requires-pause?
-  "Returns truthy when the review warrants halting for human review.
-   Pauses only on blocker-class signals — soft :needs-review calls do not pause.
-   Triggers:
-     - recommendation is :restore (judge says: roll this back)
-     - any violation at or above `threshold` severity (default :high)"
+  "Truthy when the review warrants halting for human review. Pauses on
+   :restore recommendations or any violation at/above `threshold` severity."
   ([review] (requires-pause? review :high))
   ([review threshold]
    (when review

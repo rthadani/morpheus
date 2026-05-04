@@ -1,10 +1,5 @@
 (ns morpheus.ui.components
-  "Hiccup UI components. Pure functions — no I/O.
-   All mutable state lives in the executor; these just render it.")
-
-;; ──────────────────────────────────────────
-;; Node state → visual
-;; ──────────────────────────────────────────
+  "Hiccup UI components. Pure functions — no I/O. State lives in the executor.")
 
 (def state-classes
   {:done    "node-done"
@@ -34,10 +29,6 @@
      [:text   {:class "node-sublabel" :text-anchor "middle" :y 10}
       (if duration duration (get state-labels node-state "pending"))]]))
 
-;; ──────────────────────────────────────────
-;; DAG canvas
-;; ──────────────────────────────────────────
-
 (defn dag-canvas [nodes state-map]
   [:div#dag-canvas
    [:svg {:width "100%" :viewBox "0 0 520 500"
@@ -50,10 +41,6 @@
       (let [x 260 y (+ 50 (* idx 80))]
         [:g {:transform (str "translate(" x "," y ")")}
          (node-badge node (get state-map (:id node) :pending) nil)]))]])
-
-;; ──────────────────────────────────────────
-;; DAG — log + checkpoint
-;; ──────────────────────────────────────────
 
 (defn log-line [level text]
   [:div {:class (str "log-line " (name level))} text])
@@ -94,9 +81,6 @@
    [:div.cp-label (str "Re-running " (name node-id) "…")]
    [:div.cp-summary "Feedback injected. Waiting for new output."]])
 
-;; ──────────────────────────────────────────
-;; DAG — node detail
-;; ──────────────────────────────────────────
 (defn node-detail [node state output]
   (let [stdout    (if (map? output) (:output output) output)
         files     (when (map? output) (:files-written output))
@@ -118,10 +102,6 @@
        [:div.detail-output
         [:div.detail-label "Output"]
         [:pre.detail-pre stdout]])]))
-
-;; ──────────────────────────────────────────
-;; Wiggum — iteration list row (left panel)
-;; ──────────────────────────────────────────
 
 (defn iteration-row
   [run-id {:keys [iteration duration-ms files-written files-edited
@@ -165,10 +145,6 @@
     [:span.iter-badge.badge-running "…"]
     [:span.iter-row-dur "running"]]
    [:div.iter-row-files [:span.iter-running-label "Claude Code working…"]]])
-
-;; ──────────────────────────────────────────
-;; Wiggum — iteration detail (centre panel)
-;; ──────────────────────────────────────────
 
 (defn iteration-detail
   [{:keys [iteration duration-ms files-written files-edited files-deleted
@@ -237,13 +213,9 @@
   [:div#wg-detail.iter-detail-placeholder
    "← Select an iteration"])
 
-;; ──────────────────────────────────────────
-;; Wiggum — judge review block
-;; ──────────────────────────────────────────
-
 (defn judge-review-block
-  "Renders the judge's score, recommendation, summary, and violation list.
-   Designed to sit inside .review-panel between .review-header and .review-form."
+  "Renders the judge's score, recommendation, summary, and violations.
+   Sits inside .review-panel between .review-header and .review-form."
   [review]
   (when review
     (let [{:keys [score recommendation summary violations]} review
@@ -264,10 +236,6 @@
              [:span.review-v-type (name (or type :other))]
              [:span.review-v-reason reason]])])])))
 
-;; ──────────────────────────────────────────
-;; Wiggum — control packet (right panel)
-;; ──────────────────────────────────────────
-
 (defn control-packet-panel [packet]
   (let [{:keys [objective constraints success-check anti-goals brief]} (or packet {})]
     [:div#control-packet-panel
@@ -287,12 +255,8 @@
      (when (seq brief)
        [:div.cp-brief brief])]))
 
-;; ──────────────────────────────────────────
-;; Wiggum — controls + step toggle
-;; ──────────────────────────────────────────
-
 (defn abort-button
-  "Abort button for the topbar. Pass :disabled after the abort fires to grey it out."
+  "Pass :disabled after the abort fires to grey it out."
   [run-id & [state]]
   (let [disabled? (= state :disabled)]
     [:button {:id       "abort-btn"
@@ -311,10 +275,6 @@
             :class     (str "btn" (when step-once? " btn-active"))}
    (if step-once? "Step ON" "Auto")])
 
-;; ──────────────────────────────────────────
-;; Steer widget — always-visible, both run types
-;; ──────────────────────────────────────────
-
 (defn steer-widget [run-id]
   [:div#steer-widget.steer-widget
    [:form.steer-form
@@ -326,10 +286,6 @@
       :rows        1
       :placeholder "Guide next iteration… (sent to supervisor before it plans the next step)"}]
     [:button {:type "submit" :class "btn-primary steer-btn"} "Steer →"]]])
-
-;; ──────────────────────────────────────────
-;; Wiggum — full shell page (mail split-view)
-;; ──────────────────────────────────────────
 
 (defn wiggum-shell-page [run-id summary]
   (let [state         (:state summary :pending)
@@ -351,7 +307,6 @@
        {:hx-ext "sse" :sse-connect (str "/runs/" run-id "/stream")}
        [:div {:id "sse-sink" :sse-swap "wiggum-update" :style "display:none"}]
 
-       ;; ── Topbar ─────────────────────────────────────────
        [:div.wg-topbar
         [:span.wg-run (str "#" run-id)]
         [:span.wg-obj objective]
@@ -362,39 +317,29 @@
         (step-toggle run-id step-once?)
         (abort-button run-id)]
 
-       ;; ── Review panel (hidden until :run-paused) ────────
        [:div#review-panel {:style "display:none"}]
 
-       ;; ── Left: iteration list ────────────────────────────
        [:div.wg-list
         [:div.wg-pane-header "Iterations"]
         [:div#iteration-list
-         ;; placeholder — SSE replaces this with the actual running row
          (if (= :running state)
            (iteration-running-row run-id (inc iteration))
            [:div#iter-row-running])
          (for [ev (reverse evidence-list)]
            (iteration-row run-id ev))]]
 
-       ;; ── Centre: iteration detail + steer ───────────────
        [:div.wg-detail-col
         [:div.wg-pane-header "Detail"]
         [:div#wg-detail.wg-detail-body
          (if latest (iteration-detail latest) (iteration-detail-placeholder))]
         (steer-widget run-id)]
 
-       ;; ── Right: control packet ───────────────────────────
        [:div.wg-packet-col
         [:div.wg-pane-header "Control packet"]
         (control-packet-panel packet)]
 
-       ;; ── Footer: log ─────────────────────────────────────
        [:div.wg-footer
         [:div#log-tail.log-tail]]]]]))
-
-;; ──────────────────────────────────────────
-;; DAG full shell page
-;; ──────────────────────────────────────────
 
 (defn shell-page [run-id summary]
   (let [nodes     (or (:nodes summary) [])

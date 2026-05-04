@@ -1,33 +1,23 @@
 (ns morpheus.executor.supervisor
-  "Supervisor — reviews iteration evidence and emits a control packet
-   for the next iteration.
+  "Supervisor — reviews iteration evidence and emits the next control packet.
 
-   A control packet is:
-     {:objective     string   — what to ship this iteration (one sentence)
+   Control packet:
+     {:objective     string   — what to ship this iteration
       :constraints   [string] — hard limits on approach (≤3)
       :success-check string   — shell command that must exit 0 to count as done
       :anti-goals    [string] — things the executor must not do (≤3)
-      :brief         string   — supervisor's 2-3 sentence summary of why we're pivoting}
+      :brief         string   — 2-3 sentence summary of the pivot
 
-   The supervisor identifies the next bottleneck, detects drift from the product
-   goal, rejects low-value abstraction work, and escalates on regression.
-   It does not decompose work into a sub-agent DAG."
+   The supervisor identifies the next bottleneck, detects drift from the goal,
+   rejects low-value abstraction work, and escalates on regression."
   (:require [clojure.string          :as str]
             [taoensso.timbre         :as log]
             [morpheus.executor.evidence :as evidence]
             [morpheus.executor.llm   :as llm]))
 
-;; ──────────────────────────────────────────
-;; Model config
-;; ──────────────────────────────────────────
-
 (def default-model-config
   {:model-id "claude-haiku-4-5-20251001"
-   :system   nil})  ; overridden below
-
-;; ──────────────────────────────────────────
-;; Prompt construction
-;; ──────────────────────────────────────────
+   :system   nil})
 
 (def ^:private system-prompt
   "You are a delivery supervisor. An autonomous executor has just completed an
@@ -140,10 +130,6 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
            evidence-list))))
 
 (defn- build-prompt
-  "Assembles the user-turn prompt for the supervisor LLM call.
-   initial-state — optional string describing what was already in the work-dir
-                   before any iteration ran (e.g. a pre-existing project).
-                   Shown before evidence so the supervisor knows the starting point."
   ([run-objective current-packet evidence-list]
    (build-prompt run-objective current-packet evidence-list nil nil))
   ([run-objective current-packet evidence-list user-feedback]
@@ -176,13 +162,7 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
              (str "Review the evidence above. Determine whether the executor is on track "
                   "toward the original goal or has drifted. Emit the next control packet."))))))
 
-;; ──────────────────────────────────────────
-;; Response normalisation
-;; ──────────────────────────────────────────
-
-(defn- normalise
-  "Converts raw JSON-parsed map (keyword keys, underscore names) to internal shape."
-  [raw]
+(defn- normalise [raw]
   (cond-> {:objective      (or (:objective raw) "Continue toward the product goal.")
            :constraints    (vec (or (:constraints raw) []))
            :success-check  (or (:success_check raw) (:success-check raw) "echo ok")
@@ -191,21 +171,9 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
     (seq (:plan raw))           (assoc :plan           (vec (:plan raw)))
     (seq (:expected_files raw)) (assoc :expected-files (vec (:expected_files raw)))))
 
-;; ──────────────────────────────────────────
-;; Public API
-;; ──────────────────────────────────────────
-
 (defn review
-  "Reviews the last N iterations of evidence and returns a control packet
-   for the next iteration.
-
-   run-objective  — the original high-level product goal (string).
-                    Kept stable across all iterations so the supervisor
-                    can detect drift.
-   current-packet — the control packet used for the most recent iteration.
-   evidence-list  — vec of evidence maps in chronological order (from evidence/build).
-                    Pass the last 3-5 for context without ballooning the prompt.
-   model-config   — optional map of LLM overrides (merges with default-model-config)."
+  "Reviews recent evidence and returns the next control packet.
+   evidence-list should be the last 3-5 iterations to bound prompt size."
   ([run-objective current-packet evidence-list]
    (review run-objective current-packet evidence-list {}))
   ([run-objective current-packet evidence-list model-config]
@@ -228,14 +196,7 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
      packet)))
 
 (defn bootstrap
-  "Builds the very first control packet from a run config map.
-   Called once before any iteration runs — no evidence to review.
-
-   run-config keys:
-     :objective     required — the product goal
-     :success-check optional — default \"echo ok\"
-     :constraints   optional — initial hard limits
-     :anti-goals    optional — initial anti-goals"
+  "First control packet from a run-config. Called once before any iteration runs."
   [{:keys [objective success-check constraints anti-goals]
     :or   {success-check "echo ok"
            constraints   []

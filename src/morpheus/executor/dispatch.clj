@@ -1,7 +1,7 @@
 (ns morpheus.executor.dispatch
-  "Multimethod dispatch for node execution.
-   :task, :planning, and :parallel nodes run via Claude Code.
-   :checkpoint, :graph-expand, :shell, :http remain as before."
+  "Multimethod dispatch for node execution. :task, :planning, and :parallel
+   nodes shell out to Claude Code; :checkpoint, :graph-expand, :shell, :http
+   are handled in-process."
   (:require
    [clojure.core.async          :as async]
    [clojure.string              :as str]
@@ -12,31 +12,12 @@
    [morpheus.graph.context      :as ctx]
    [morpheus.graph.topo         :as topo]))
 
-;; ──────────────────────────────────────────
-;; Sentinel value returned by :checkpoint nodes
-;; ──────────────────────────────────────────
-
 (def checkpoint-sentinel ::checkpoint)
 
-;; ──────────────────────────────────────────
-;; Dispatch
-;; ──────────────────────────────────────────
-
 (defmulti execute-node!
-  "Dispatch on :type. Returns output value for the node.
-   Side effects: may mutate graph-atom (graph-expand), may put on event-ch."
+  "Dispatch on :type. Returns the node's output value. May mutate graph-atom
+   (graph-expand) and may put events on event-ch."
   (fn [node _inputs _context _graph-atom _event-ch] (:type node)))
-
-;; ──────────────────────────────────────────
-;; :task — Claude Code subprocess
-;;
-;; Node config keys:
-;;   :prompt       Template string with {{slot}} placeholders
-;;   :claude-md    CLAUDE.md template (string, context keyword, or nil)
-;;   :project-dir  Optional path to copy into the work dir
-;;   :done-check   Optional shell command to verify completion
-;;   :executor     :claude-code (default) or :llm (raw API fallback)
-;; ──────────────────────────────────────────
 
 (defmethod execute-node! :task
   [node inputs context _graph-atom event-ch]
@@ -78,18 +59,6 @@
        :work-dir      (:work-dir result)
        :exit          (:exit result)})))
 
-;; ──────────────────────────────────────────
-;; :planning — Claude Code in plan mode
-;;
-;; Runs against the real codebase (read-only) to produce structured plan.
-;; Parses ## node:<id> sections from output.
-;;
-;; Node config keys:
-;;   :sections     Vec of node-id keywords to plan for
-;;   :project-dir  Path to codebase — Claude Code reads it for context
-;;   :claude-md    Optional framing for the planning session
-;; ──────────────────────────────────────────
-
 (defmethod execute-node! :planning
   [node inputs context _graph-atom _event-ch]
   (log/info "Planning node" (:id node))
@@ -121,10 +90,6 @@
      :sections        sections
      :proposed-nodes  nil
      :work-dir        work-dir}))
-
-;; ──────────────────────────────────────────
-;; :parallel — fan-out to N concurrent Claude Code sessions
-;; ──────────────────────────────────────────
 
 (defmethod execute-node! :parallel
   [node inputs context _graph-atom event-ch]
@@ -159,10 +124,6 @@
       :last   (last results)
       {:branches results})))
 
-;; ──────────────────────────────────────────
-;; :checkpoint — suspends for human review
-;; ──────────────────────────────────────────
-
 (defmethod execute-node! :checkpoint
   [node _inputs context _graph-atom event-ch]
   (log/info "Checkpoint reached" (:id node))
@@ -176,10 +137,6 @@
                           :actions   (:actions node)})
     checkpoint-sentinel))
 
-;; ──────────────────────────────────────────
-;; :graph-expand — splices new nodes into live graph
-;; ──────────────────────────────────────────
-
 (defmethod execute-node! :graph-expand
   [node inputs _context graph-atom _event-ch]
   (let [expand-fn (requiring-resolve (:expand-fn node))
@@ -187,10 +144,6 @@
         _         (log/info "Expanding graph with" (count new-nodes) "new nodes")]
     (swap! graph-atom topo/splice-nodes new-nodes)
     {:node-ids (mapv :id new-nodes)}))
-
-;; ──────────────────────────────────────────
-;; :subgraph — runs a nested graph definition
-;; ──────────────────────────────────────────
 
 (defmethod execute-node! :subgraph
   [node inputs _context _graph-atom _event-ch]
@@ -207,10 +160,6 @@
           @(:context sub-run)
           (do (Thread/sleep 200) (recur)))))))
 
-;; ──────────────────────────────────────────
-;; :shell
-;; ──────────────────────────────────────────
-
 (defmethod execute-node! :shell
   [node inputs _context _graph-atom _event-ch]
   (let [cmd    (ctx/render-prompt (:command node) inputs)
@@ -219,10 +168,6 @@
     (when (pos? (:exit result))
       (log/warn "Shell failed" {:cmd cmd :exit (:exit result)}))
     {:stdout (:out result) :exit (:exit result)}))
-
-;; ──────────────────────────────────────────
-;; :http
-;; ──────────────────────────────────────────
 
 (defmethod execute-node! :http
   [node inputs _context _graph-atom _event-ch]

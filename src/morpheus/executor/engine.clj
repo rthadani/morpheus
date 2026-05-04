@@ -1,7 +1,6 @@
 (ns morpheus.executor.engine
-  "Core execution engine. Walks the DAG topologically,
-   dispatches nodes, manages state, threads context,
-   and communicates over a core.async event channel."
+  "Core DAG executor. Walks the graph topologically, dispatches nodes, threads
+   context, and emits events on a core.async channel."
   (:require
    [clojure.core.async      :as async :refer [go go-loop chan put! <! >! close!]]
    [taoensso.timbre         :as log]
@@ -9,31 +8,23 @@
    [morpheus.graph.context  :as ctx]
    [morpheus.executor.dispatch :as dispatch]))
 
-;; ──────────────────────────────────────────
-;; Run record
-;; ──────────────────────────────────────────
-
 (defn create-run
-  "Returns a fresh run map. graph-atom holds the live graph
-   (may grow via graph-expand). All mutable state in atoms."
+  "Returns a fresh run map. graph-atom holds the live graph (may grow via
+   graph-expand). All mutable state in atoms."
   [run-id graph initial-context]
   (let [event-ch (chan 64)]
     {:run-id         run-id
      :graph-atom     (atom graph)
      :context        (atom (merge (:graph/context graph) initial-context))
-     :state          (atom {})          ; node-id → :pending|:running|:done|:paused|:error
-     :output-buffers (atom {})          ; node-id → accumulated stdout string (live)
-     :steer-buffer   (atom nil)         ; human guidance queued for next node
-     :aborted?       (atom false)       ; set by abort! to stop the loop at next tick
-     :event-log      (atom [])          ; append-only; replayed to SSE clients that connect late
+     :state          (atom {})
+     :output-buffers (atom {})
+     :steer-buffer   (atom nil)
+     :aborted?       (atom false)
+     :event-log      (atom [])
      :event-ch       event-ch
-     :event-mult     (async/mult event-ch) ; created once; SSE taps into this
-     :resume-ch      (chan 1)              ; human action → executor (approve/revise/abort)
+     :event-mult     (async/mult event-ch)
+     :resume-ch      (chan 1)
      :started-at     (System/currentTimeMillis)}))
-
-;; ──────────────────────────────────────────
-;; State helpers
-;; ──────────────────────────────────────────
 
 (defn- set-state! [{:keys [state event-ch]} node-id new-state]
   (swap! state assoc node-id new-state)
@@ -43,13 +34,8 @@
   (when event-log (swap! event-log conj event))
   (put! event-ch event))
 
-;; ──────────────────────────────────────────
-;; Node execution wrapper
-;; ──────────────────────────────────────────
-
 (defn- run-node!
-  "Resolves inputs, calls dispatch, stores output.
-   Returns :done, :paused, or :error."
+  "Resolves inputs, calls dispatch, stores output. Returns :done | :paused | :error."
   [{:keys [context graph-atom event-ch output-buffers] :as run} node]
   (let [default-model (get-in @graph-atom [:graph/default-model :model-id])
         node          (if (and default-model (nil? (:model node)))
@@ -81,14 +67,10 @@
                     :message (ex-message e)})
         :error))))
 
-;; ──────────────────────────────────────────
-;; Main executor loop
-;; ──────────────────────────────────────────
-
 (defn execute!
-  "Starts the executor in a go-loop. Returns the run map immediately.
-   Sends events to (:event-ch run) as nodes execute.
-   Pauses at :checkpoint nodes and waits on (:resume-ch run)."
+  "Starts the executor in a go-loop. Returns the run map immediately. Sends
+   events to (:event-ch run) as nodes execute. Pauses at :checkpoint nodes
+   and waits on (:resume-ch run)."
   [run-id graph initial-context]
   (let [run (create-run run-id graph initial-context)]
     (go
@@ -98,17 +80,14 @@
               nodes    (topo/topo-sort (:graph/nodes graph))
               runnable (topo/runnable-nodes nodes @(:state run))]
           (cond
-            ;; abort requested externally
             @(:aborted? run)
             (emit! run {:type :run-aborted :run-id run-id})
 
-            ;; nothing left to run and no paused nodes — done
             (and (empty? runnable)
                  (not (topo/paused? @(:state run)))
                  (topo/all-done? nodes @(:state run)))
             (emit! run {:type :run-complete :run-id run-id})
 
-            ;; paused — wait for human resume signal
             (topo/paused? @(:state run))
             (let [action (<! (:resume-ch run))]
               (log/info "Resume action received" action)
@@ -120,7 +99,6 @@
 
                 :revise
                 (do
-                  ;; inject feedback into context then re-run the node
                   (when-let [fk (get-in (topo/node-map nodes)
                                         [(:node-id action) :on-revise :inject-key])]
                     (swap! (:context run) assoc fk (:feedback action)))
@@ -130,7 +108,6 @@
                 :abort
                 (emit! run {:type :run-aborted :run-id run-id})))
 
-            ;; nodes are ready — run them concurrently
             (seq runnable)
             (do
               (doseq [node runnable]
@@ -138,37 +115,29 @@
                 (go
                   (let [result (run-node! run node)]
                     (set-state! run (:id node) result))))
-              ;; small yield to let go-blocks start
               (<! (async/timeout 50))
               (recur))
 
-            ;; nothing runnable but not done — nodes are still :running
             :else
             (do
               (<! (async/timeout 100))
               (recur))))))
     run))
 
-;; ──────────────────────────────────────────
-;; Human action entry point
-;; ──────────────────────────────────────────
-
 (defn resume!
-  "Called by the HTTP handler when a human acts on a checkpoint.
-   action-map: {:action :approve|:revise|:abort
-                :node-id <node-id>
-                :feedback \"optional string\"}"
+  "Acts on a paused checkpoint. action-map: {:action :approve|:revise|:abort
+                                              :node-id <id> :feedback \"...\"}"
   [run action-map]
   (put! (:resume-ch run) action-map))
 
 (defn abort!
-  "Stops the engine loop after the current tick. Running nodes finish naturally."
+  "Stops the engine after the current tick. Running nodes finish naturally."
   [run]
   (reset! (:aborted? run) true))
 
 (defn steer!
   "Queues human guidance to be injected into context before the next node runs.
-   Overwrites any previously queued steer. Pass nil or blank to clear."
+   Overwrites any pending steer; pass nil/blank to clear."
   [run text]
   (let [t (when (seq text) text)]
     (reset! (:steer-buffer run) t)

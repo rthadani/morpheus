@@ -1,31 +1,21 @@
 (ns morpheus.executor.wiggum
-  "Wiggum loop — a single-threaded, iteration-based executor.
-
-   Instead of walking a DAG of nodes, the Wiggum loop:
-     1. Runs one bounded Claude Code iteration against the active control packet.
-     2. Captures deterministic evidence (file changes, verification, slop signals).
-     3. Pauses (if step-once mode) or calls the supervisor.
-     4. The supervisor reviews evidence and emits a tighter control packet.
-     5. Repeat until: verification passes, max-iterations reached, or aborted.
-
-   The work directory persists across iterations so changes accumulate.
-   The project is copied in once at run start — not on every iteration.
+  "Iteration-based executor: run one bounded Claude Code pass, capture evidence,
+   let the supervisor emit the next control packet, repeat until verification
+   passes / max-iterations / aborted. Work directory persists across iterations.
 
    run-config keys:
-     :objective      required  — product goal, stable across all iterations
-     :project-dir    optional  — path copied into the work dir at start
-     :success-check  optional  — shell command; exit 0 = done. Default: \"echo ok\"
-     :constraints    optional  — initial constraint list for first control packet
+     :objective      required  — product goal, stable across iterations
+     :project-dir    optional  — copied into the work dir at start
+     :success-check  optional  — shell command; exit 0 = done. Default \"echo ok\"
+     :constraints    optional  — initial constraints for first control packet
      :anti-goals     optional  — initial anti-goals for first control packet
      :max-iterations optional  — hard cap (default 20)
-     :step-once?     optional  — start in step-once mode (default false)
+     :step-once?     optional  — start in step-once mode
      :timeout-ms     optional  — per-iteration CC timeout (default 300000)
-     :model-config          optional  — LLM model for both executor and supervisor
-     :executor-model-config optional  — overrides :model-config for the executor only
-     :supervisor-model-config optional — overrides :model-config for the supervisor only
-     :generate-claude-md? optional  — when true, generates a project-level CLAUDE.md
-                                       after the run verifies successfully, overwriting
-                                       the executor task-brief left in the work-dir"
+     :model-config            optional  — LLM for executor + supervisor
+     :executor-model-config   optional  — overrides for executor only
+     :supervisor-model-config optional  — overrides for supervisor only
+     :generate-claude-md?     optional  — write a project CLAUDE.md after success"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
    [clojure.edn                 :as edn]
@@ -40,10 +30,6 @@
    [morpheus.executor.store        :as store]
    [morpheus.executor.supervisor   :as supervisor]))
 
-;; ──────────────────────────────────────────
-;; Run record
-;; ──────────────────────────────────────────
-
 (defn create-run
   "Returns a fresh Wiggum run map. All mutable state in atoms."
   [run-id run-config]
@@ -51,23 +37,19 @@
     {:run-id         run-id
      :objective      (:objective run-config)
      :config         run-config
-     :work-dir       (atom nil)          ; set once the temp dir is created
-     :control-packet (atom nil)          ; current control packet
-     :iterations     (atom [])           ; vec of evidence maps (one per iteration)
-     :initial-state  (atom nil)          ; top-level-summary before any iteration ran (persisted)
-     :steer-buffer   (atom nil)          ; human guidance queued for next supervisor review
-     :live-output    (atom "")          ; accumulated stdout for the running iteration
-     :event-log      (atom [])           ; append-only log of all events
-     :state          (atom :pending)     ; :pending :running :paused :done :aborted :error
+     :work-dir       (atom nil)
+     :control-packet (atom nil)
+     :iterations     (atom [])
+     :initial-state  (atom nil)
+     :steer-buffer   (atom nil)
+     :live-output    (atom "")
+     :event-log      (atom [])
+     :state          (atom :pending)
      :control        (atom {:step-once? (boolean (:step-once? run-config false))})
      :event-ch       event-ch
-     :event-mult     (async/mult event-ch) ; created once; SSE taps into this
+     :event-mult     (async/mult event-ch)
      :resume-ch      (chan 1)
      :started-at     (System/currentTimeMillis)}))
-
-;; ──────────────────────────────────────────
-;; Internal helpers
-;; ──────────────────────────────────────────
 
 (defn- emit!
   [{:keys [event-ch event-log]} event]
@@ -79,20 +61,13 @@
   (reset! (:state run) new-state)
   (emit! run {:type :state-change :state new-state}))
 
-(defn- run-verification!
-  "Runs the success-check shell command in work-dir.
-   Returns {:exit n :output s}."
-  [work-dir command]
+(defn- run-verification! [work-dir command]
   (log/info "Running verification" {:command command})
   (let [result (shell/sh "sh" "-c" command :dir work-dir)]
     {:exit   (:exit result)
      :output (str (:out result) (:err result))}))
 
-(defn- top-level-summary
-  "Returns a one-line summary of top-level entries in work-dir.
-   e.g. \"kanban-app/ server/ Dockerfile docker-compose.yml\"
-   Gives the supervisor an immediate picture of which phases exist."
-  [work-dir]
+(defn- top-level-summary [work-dir]
   (let [f (io/file work-dir)]
     (->> (.listFiles f)
          (remove nil?)
@@ -101,11 +76,7 @@
          sort
          (str/join "  "))))
 
-(defn- check-expected-files
-  "Checks which paths from the control packet's :expected-files exist in work-dir.
-   Directories (trailing /) are checked with .isDirectory, files with .exists.
-   Returns {:present [...] :missing [...]}."
-  [work-dir expected-files]
+(defn- check-expected-files [work-dir expected-files]
   (let [base (io/file work-dir)]
     (group-by (fn [path]
                 (let [f (io/file base path)]
@@ -115,16 +86,13 @@
               expected-files)))
 
 (defn- dir-tree
-  "Returns a file listing of work-dir for the supervisor.
-   Searches for .gitignore files up to 2 levels deep (handles scaffolded subdirs
-   like kanban-app/.gitignore). Caps output at 300 lines to keep prompts bounded."
+  "File listing for the supervisor, respecting .gitignore up to 2 levels deep
+   and capped at 300 lines to keep prompts bounded."
   [work-dir]
-  (let [;; find all .gitignore files within 2 levels
-        gi-result (shell/sh "find" "." "-maxdepth" "2" "-name" ".gitignore"
+  (let [gi-result (shell/sh "find" "." "-maxdepth" "2" "-name" ".gitignore"
                             :dir work-dir)
         gi-paths  (when (zero? (:exit gi-result))
                     (remove str/blank? (str/split-lines (:out gi-result))))
-        ;; parse patterns from every .gitignore found
         ignores   (->> gi-paths
                        (mapcat (fn [rel-path]
                                  (let [f (io/file work-dir (str/replace rel-path #"^\.\/" ""))]
@@ -147,14 +115,8 @@
 (defn- verification-passed? [verification]
   (and (some? verification) (zero? (:exit verification))))
 
-;; ──────────────────────────────────────────
-;; Git snapshots — per-phase backup & restore
-;;
-;; A lightweight repo inside work-dir is used only for snapshotting. Baseline
-;; commit captures the copied-in project state; each completed phase commits
-;; on top of it. When the judge recommends a restore, we `git reset --hard`
-;; back to the previous phase's commit and re-enter the phase.
-;; ──────────────────────────────────────────
+;; A lightweight git repo inside work-dir is used only for snapshot/restore
+;; between phases — never pushed anywhere.
 
 (defn- git-sh [work-dir & args]
   (apply shell/sh (concat (cons "git" args) [:dir work-dir])))
@@ -163,16 +125,10 @@
   (.exists (io/file work-dir ".git")))
 
 (def ^:private snapshot-exclude
-  "Additive .git/info/exclude content for the morpheus snapshot repo.
-   Filters dependency trees, build outputs, caches, compiled bytecode,
-   runtime DB/log files, IDE configs and OS files so the judge's diff
-   stays focused on source the agent actually wrote."
   (str/join "\n"
-    [;; morpheus bookkeeping
-     "CLAUDE.md"
+    ["CLAUDE.md"
      "morpheus-run-snapshot.edn"
      "morpheus-ui-state.edn"
-     ;; node / js
      "node_modules/"
      ".next/"
      ".nuxt/"
@@ -183,7 +139,6 @@
      ".vite/"
      "coverage/"
      ".nyc_output/"
-     ;; python
      "__pycache__/"
      "*.pyc"
      "*.pyo"
@@ -195,39 +150,28 @@
      ".ruff_cache/"
      ".tox/"
      "*.egg-info/"
-     ;; jvm / clojure
      "target/"
      ".cpcache/"
      ".clj-kondo/.cache/"
      ".lsp/.cache/"
      "*.class"
-     ;; rust / go
      "vendor/"
-     ;; generic build outputs
      "build/"
      "dist/"
      "out/"
      ".gradle/"
-     ;; runtime data — never source
      "*.db"
      "*.db-journal"
      "*.sqlite"
      "*.sqlite3"
      "*.log"
-     ;; editor / ide / os
      ".idea/"
      ".vscode/"
      ".DS_Store"
      "Thumbs.db"
      ""]))
 
-(defn- ensure-git-repo!
-  "Idempotently initialises a git repo in work-dir and makes a baseline commit.
-   Writes a baseline .git/info/exclude (additive to any project .gitignore so
-   the project's own ignore rules are left untouched) covering common heavy
-   dirs, caches, build outputs and runtime artefacts. The snapshot repo lives
-   only inside work-dir for diffing — it is never committed back."
-  [work-dir]
+(defn- ensure-git-repo! [work-dir]
   (when-not (git-repo? work-dir)
     (log/info "Initialising git snapshot repo" {:dir work-dir})
     (git-sh work-dir "init" "-q")
@@ -239,35 +183,23 @@
     (git-sh work-dir "add" "-A")
     (git-sh work-dir "commit" "-q" "--allow-empty" "-m" "morpheus:baseline")))
 
-(defn- git-diff
-  "Raw diff of the working tree against the last commit. Uses `git add -N`
-   (intent-to-add) so brand-new untracked files show up in the diff. Clears
-   the intent-to-add afterwards so a later `git add -A && git commit` behaves
-   normally."
-  [work-dir]
+(defn- git-diff [work-dir]
+  ;; --intent-to-add so brand-new untracked files appear in the diff;
+  ;; reset afterwards so a later commit isn't poisoned.
   (git-sh work-dir "add" "--intent-to-add" ".")
   (let [d (:out (git-sh work-dir "--no-pager" "diff" "HEAD"))]
     (git-sh work-dir "reset" "-q")
     d))
 
-(defn- git-commit-phase!
-  "Commits the current phase's changes on top of the previous phase's commit."
-  [work-dir iteration]
+(defn- git-commit-phase! [work-dir iteration]
   (git-sh work-dir "add" "-A")
   (git-sh work-dir "commit" "-q" "--allow-empty" "-m"
           (str "morpheus:phase-end iter-" iteration)))
 
-(defn- git-restore!
-  "Resets work-dir to the last committed state and removes any untracked files
-   the judged phase added."
-  [work-dir]
+(defn- git-restore! [work-dir]
   (log/info "Restoring work-dir via git reset --hard" {:dir work-dir})
   (git-sh work-dir "reset" "--hard" "-q" "HEAD")
   (git-sh work-dir "clean" "-fdq"))
-
-;; ──────────────────────────────────────────
-;; Provider fallback
-;; ──────────────────────────────────────────
 
 (def ^:private rate-limit-signals
   #{"rate_limit_error" "overloaded_error" "429" "too many requests" "rate limit"})
@@ -278,12 +210,9 @@
          (boolean (some #(str/includes? out %) rate-limit-signals)))))
 
 (defn- run-with-fallback!
-  "Runs CC with the given opts. If the result looks like a rate-limit error and
-   run-config has a :fallback-model, waits :fallback-delay-ms (default 30s)
-   then retries once with the fallback model.
-   The fallback always runs against vanilla Anthropic — :model-config is
-   reset so we don't try the fallback id against e.g. Moonshot.
-   Emits :provider-fallback event if the retry fires."
+  "Retries a rate-limited CC run once with :fallback-model after :fallback-delay-ms.
+   Fallback always runs vanilla Anthropic — :model-config is reset so a fallback
+   id like claude-haiku-4-5-20251001 doesn't get sent to e.g. Moonshot."
   [run opts run-config]
   (let [result (cc/run! opts)]
     (if-not (rate-limited? result)
@@ -301,11 +230,7 @@
           (log/warn "Rate limit detected but no :fallback-model configured")
           result)))))
 
-(defn- strip-path-prefix
-  "Removes occurrences of `prefix/` from text so plan steps like
-   'create kanban-full/src/app.ts' become 'create src/app.ts'.
-   No-op when prefix is nil or blank."
-  [text prefix]
+(defn- strip-path-prefix [text prefix]
   (if (seq prefix)
     (str/replace text
                  (re-pattern (str "(?i)\\b" (java.util.regex.Pattern/quote prefix) "/"))
@@ -313,19 +238,11 @@
     text))
 
 (defn- control-packet->claude-md
-  "Generates a CLAUDE.md for the executor from the current control packet.
-
-   work-dir-contents   — one-line string from top-level-summary, injected so the
-                         executor sees exactly what exists before touching any files.
-   path-prefix-to-strip — project dir basename (e.g. \"kanban-full\"); any plan step
-                          that mentions this as a path prefix is rewritten in code
-                          before the LLM ever sees it."
   ([packet] (control-packet->claude-md packet nil nil))
   ([packet work-dir-contents] (control-packet->claude-md packet work-dir-contents nil))
   ([packet work-dir-contents path-prefix-to-strip]
    (let [constraints (:constraints packet)
          anti-goals  (:anti-goals  packet)
-         ;; strip wrong path prefix from plan steps *in code* — no LLM needed
          plan        (when (seq (:plan packet))
                        (map #(strip-path-prefix % path-prefix-to-strip) (:plan packet)))]
      (str "> **Working directory**: you are already in the project root.\n"
@@ -364,36 +281,19 @@
                  (str/join "\n" (map #(str "- " %) anti-goals))))
           "\n"))))
 
-(defn- recent-evidence
-  "Returns the last N evidence maps for the supervisor."
-  [iterations-atom n]
+(defn- recent-evidence [iterations-atom n]
   (vec (take-last n @iterations-atom)))
 
-(defn- consume-steer!
-  "Atomically reads and clears the steer buffer. Returns the steer text or nil."
-  [run]
+(defn- consume-steer! [run]
   (first (swap-vals! (:steer-buffer run) (constantly nil))))
 
-;; ──────────────────────────────────────────
-;; Run snapshot — persist state after every iteration
-;; ──────────────────────────────────────────
-
-(defn- snapshot-path
-  "Returns the snapshot file path, or nil when no stable path is available.
-   Prefers project-dir so the snapshot survives temp-dir cleanup.
-   Falls back to work-dir. Returns nil when both are absent (no-op for snapshots)."
-  [run-config work-dir]
+(defn- snapshot-path [run-config work-dir]
   (if-let [pd (:project-dir run-config)]
     (str pd "/morpheus-run-snapshot.edn")
     (when work-dir
       (str work-dir "/morpheus-run-snapshot.edn"))))
 
-(defn- write-snapshot!
-  "Serialises the run state after each completed iteration.
-   Written to project-dir/morpheus-run-snapshot.edn (or work-dir as fallback)
-   so execute! can resume automatically on the next invocation.
-   Failures are logged as warnings and swallowed — the run must not crash due to I/O here."
-  [run]
+(defn- write-snapshot! [run]
   (try
     (when-let [work-dir @(:work-dir run)]
       (when-let [path (snapshot-path (:config run) work-dir)]
@@ -412,14 +312,11 @@
     (catch Exception e
       (log/warn "Snapshot write failed (run continues)" {:message (ex-message e)}))))
 
-(defn read-snapshot
-  "Reads the snapshot EDN from path and returns it as a map."
-  [path]
+(defn read-snapshot [path]
   (edn/read-string (slurp path)))
 
 (defn- load-snapshot
-  "Returns the snapshot map if a valid snapshot exists for run-config
-   and its work-dir is still present on disk, otherwise nil."
+  "Snapshot map if one exists for run-config and its work-dir is still on disk."
   [run-config]
   (try
     (let [path (snapshot-path run-config nil)]
@@ -433,15 +330,7 @@
       (log/warn "Failed to read snapshot — starting fresh" {:message (ex-message e)})
       nil)))
 
-;; ──────────────────────────────────────────
-;; Post-run CLAUDE.md generation
-;; ──────────────────────────────────────────
-
-(defn- generate-project-claude-md!
-  "Called once after a successful run when :generate-claude-md? is true.
-   Overwrites the executor task-brief CLAUDE.md with a real project CLAUDE.md
-   generated by the supervisor LLM from the final state of the work-dir."
-  [run work-dir]
+(defn- generate-project-claude-md! [run work-dir]
   (let [config    (:config run)
         objective (:objective config)
         top       (top-level-summary work-dir)
@@ -465,36 +354,24 @@
     (log/info "Writing project CLAUDE.md" {:work-dir work-dir :chars (count content)})
     (spit (str work-dir "/CLAUDE.md") content)))
 
-;; ──────────────────────────────────────────
-;; Core iteration
-;; ──────────────────────────────────────────
-
-(defn- run-iteration!
-  "Runs one Claude Code iteration and returns evidence.
-   Writes the control-packet CLAUDE.md, invokes CC (with fallback on rate limit),
-   then runs the success-check if configured."
-  [run work-dir iteration control-packet]
+(defn- run-iteration! [run work-dir iteration control-packet]
   (let [config        (:config run)
         timeout-ms    (:timeout-ms config 300000)
         exec-cfg      (or (:executor-model-config config)
                           (:model-config config))
         primary-model (:model-id exec-cfg)
         success-check (:success-check control-packet)
-        ;; snapshot actual work-dir contents BEFORE running CC — injected into CLAUDE.md
-        ;; so the executor sees exactly what exists and won't fabricate paths.
         current-top   (top-level-summary work-dir)
-        ;; basename of the original project-dir, used to strip wrong path prefixes
-        ;; from plan steps produced by the supervisor (e.g. "kanban-full/src/" → "src/")
+        ;; basename of project-dir, used to strip wrong path prefixes from plan
+        ;; steps the supervisor produces (e.g. "kanban-full/src/" → "src/")
         proj-prefix   (some-> (get-in config [:project-dir])
                                io/file .getName)]
-    ;; write scoped CLAUDE.md for this iteration
     (reset! (:live-output run) "")
     (cc/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix))
     (emit! run {:type           :iteration-started
                 :iteration      iteration
                 :work-dir       work-dir
                 :control-packet control-packet})
-    ;; run Claude Code — no :project-dir (project copied at run start)
     (let [cc-result    (run-with-fallback!
                          run
                          {:work-dir     work-dir
@@ -515,9 +392,8 @@
           expected         (:expected-files control-packet)
           expected-check   (when (seq expected)
                              (check-expected-files work-dir expected))
-          ;; Phase boundary: a phase is the set of expected-files in the packet.
-          ;; It ends the iteration in which all of those files are present (or
-          ;; immediately, when the packet declares no expected-files at all).
+          ;; A phase = the set of expected-files in the packet. The phase ends
+          ;; the iteration in which they all exist (or immediately when none).
           phase-ended?     (or (empty? expected)
                                (empty? (:missing expected-check)))
           ev0              (evidence/build iteration cc-result verification top-level tree expected-check)
@@ -541,13 +417,7 @@
                   :evidence  ev})
       ev)))
 
-;; ──────────────────────────────────────────
-;; Execute! helpers
-;; ──────────────────────────────────────────
-
-(defn- build-next-packet
-  "Calls the supervisor and pins :success-check from run-config onto the result."
-  [run-config current-packet evidence-vec feedback initial-state]
+(defn- build-next-packet [run-config current-packet evidence-vec feedback initial-state]
   (assoc (supervisor/review
            (:objective run-config)
            current-packet
@@ -558,20 +428,14 @@
            initial-state)
          :success-check (:success-check run-config "echo ok")))
 
-(defn- finish-run!
-  "Marks run done, optionally generates a project CLAUDE.md, emits :run-complete."
-  [run run-config work-dir reason iteration]
+(defn- finish-run! [run run-config work-dir reason iteration]
   (set-state! run :done)
   (when (:generate-claude-md? run-config)
     (generate-project-claude-md! run work-dir))
   (store/persist-run! run)
   (emit! run {:type :run-complete :reason reason :iteration iteration}))
 
-(defn- init-run!
-  "Sets up the work dir, initial-state snapshot, and first control packet.
-   Mutates run atoms as a side effect.
-   Returns {:work-dir :initial-state :start-iter :start-packet}."
-  [run run-config snapshot]
+(defn- init-run! [run run-config snapshot]
   (let [run-id    (:run-id run)
         resuming? (boolean snapshot)
         work-dir  (if resuming?
@@ -608,14 +472,7 @@
      :start-iter    start-iter
      :start-packet  start-packet}))
 
-;; ──────────────────────────────────────────
-;; Main loop
-;; ──────────────────────────────────────────
-
-(defn- iteration-context
-  "Collapses post-iteration evidence + run-config into a single decision map.
-   Used by the loop to choose between pausing and auto-continuing."
-  [run run-config ev iteration]
+(defn- iteration-context [run run-config ev iteration]
   (let [verified?        (verification-passed? (:verification ev))
         checkpoint-every (:checkpoint-every run-config)
         milestone-hit?   (and checkpoint-every
@@ -632,18 +489,13 @@
      :review-pause? review-pause?
      :pause?        (or (:step-once? @(:control run)) milestone-hit? review-pause?)}))
 
-(defn- merge-steer+feedback
-  "Combines optional human feedback (from :step action) with any pending steer."
-  [feedback steer]
+(defn- merge-steer+feedback [feedback steer]
   (cond (and feedback steer) (str feedback "\n\n" steer)
         feedback             feedback
         steer                steer
         :else                nil))
 
-(defn- next-packet-after-step
-  "Builds the next control packet after a verified-but-not-done :step action,
-   merging supervisor review with any human feedback / steer."
-  [run run-config control-packet initial-state action]
+(defn- next-packet-after-step [run run-config control-packet initial-state action]
   (build-next-packet run-config control-packet
                      (recent-evidence (:iterations run) 3)
                      (merge-steer+feedback
@@ -652,11 +504,8 @@
                      initial-state))
 
 (defn- apply-resume-action
-  "Interprets a human resume action and returns one of:
-     [:recur iteration control-packet]   ; loop should recur with these values
-     [:done]                              ; loop should exit (run finished/aborted)
-   The loop body translates these into actual recur or termination — only the
-   loop can call recur in tail position."
+  "Returns [:recur iter packet] or [:done] — only the loop can call recur in
+   tail position, so we tag the next step and let the loop body dispatch."
   [action run run-config work-dir iteration control-packet initial-state ctx commit-phase!]
   (case (:action action)
     :abort
@@ -664,8 +513,7 @@
         (emit! run {:type :run-aborted})
         [:done])
 
-    ;; :restore — judge says this phase did damage; roll back to the previous
-    ;; accepted state and re-enter the phase.
+    ;; judge says this phase did damage; roll back and re-enter the phase
     :restore
     (do (git-restore! work-dir)
         [:recur iteration control-packet])
@@ -676,7 +524,6 @@
     :retry-with-overrides
     [:recur iteration (merge control-packet (:overrides action))]
 
-    ;; :step — verified = done; otherwise advance with merged steer/feedback
     (if (:verified? ctx)
       (do (commit-phase!)
           (finish-run! run run-config work-dir :verified iteration)
@@ -686,10 +533,7 @@
                   (next-packet-after-step run run-config control-packet
                                           initial-state action)]))))
 
-(defn- await-resume!
-  "Marks run paused, emits :run-paused with ctx fields, blocks on resume-ch.
-   Returns the resume action and flips state back to :running."
-  [run iteration ctx]
+(defn- await-resume! [run iteration ctx]
   (set-state! run :paused)
   (emit! run (merge {:type :run-paused :iteration iteration}
                     (select-keys ctx [:verified? :milestone? :phase-ended?
@@ -700,17 +544,12 @@
 
 (defn execute!
   "Starts the Wiggum loop in a go-block. Returns the run map immediately.
-   Sends events to (:event-ch run) as iterations proceed.
-   Pauses after each iteration when step-once mode is enabled.
-
-   If project-dir contains a morpheus-run-snapshot.edn from a previous run
-   AND that run's work-dir still exists on disk, the loop resumes automatically
-   from the last completed iteration rather than starting fresh.
-
-   run-config: see namespace docstring for keys."
+   Sends events to (:event-ch run). Pauses after each iteration in step-once
+   mode. Auto-resumes from project-dir/morpheus-run-snapshot.edn when the
+   work-dir from that snapshot still exists."
   [run-id run-config]
-  (let [run      (create-run run-id run-config)
-        snapshot (load-snapshot run-config)
+  (let [run       (create-run run-id run-config)
+        snapshot  (load-snapshot run-config)
         max-iters (or (:max-iterations run-config) 20)]
     (go
       (set-state! run :running)
@@ -765,50 +604,43 @@
           (emit! run {:type :run-error :message (.getMessage e)}))))
     run))
 
-;; ──────────────────────────────────────────
-;; External control
-;; ──────────────────────────────────────────
-
 (defn step!
-  "Enable step-once mode. The loop pauses after the current iteration finishes."
+  "Enable step-once mode — pause after the current iteration."
   [run]
   (swap! (:control run) assoc :step-once? true)
   (emit! run {:type :control-changed :step-once? true}))
 
 (defn auto!
-  "Disable step-once mode. The loop resumes auto-advancing."
+  "Disable step-once mode — resume auto-advancing."
   [run]
   (swap! (:control run) assoc :step-once? false)
   (emit! run {:type :control-changed :step-once? false}))
 
 (defn resume!
-  "Called by the HTTP handler when a human acts on a paused run.
-
-   action-map keys:
-     :action   — :step | :retry | :retry-with-overrides | :restore | :abort
+  "Acts on a paused run. action-map keys:
+     :action    — :step | :retry | :retry-with-overrides | :restore | :abort
      :overrides — map merged into control packet (for :retry-with-overrides)
-
-   :restore resets the work-dir to the previously-accepted git commit and
-   re-enters the current phase, discarding whatever the executor just did."
+     :feedback  — optional human steer text (for :step)
+   :restore rewinds the work-dir to the previously-accepted git commit and
+   re-enters the current phase, discarding what the executor just did."
   [run action-map]
   (put! (:resume-ch run) action-map))
 
 (defn abort!
-  "Signals the loop to stop after the current iteration."
+  "Stop the loop after the current iteration."
   [run]
   (reset! (:state run) :aborted))
 
 (defn steer!
-  "Queues human guidance to be passed to the supervisor before the next iteration.
-   Overwrites any previously queued steer. Pass nil or blank to clear."
+  "Queue human guidance for the next supervisor review. Overwrites any pending
+   steer; pass nil/blank to clear."
   [run text]
   (let [t (when (seq text) text)]
     (reset! (:steer-buffer run) t)
     (emit! run {:type :steer-queued :text (or t "")})))
 
 (defn clear-snapshot!
-  "Deletes the snapshot file for run-config so the next execute! starts fresh.
-   Useful when you want to discard a previous run's state and begin again."
+  "Delete the snapshot file for run-config so the next execute! starts fresh."
   [run-config]
   (when-let [path (snapshot-path run-config nil)]
     (let [f (io/file path)]
@@ -816,22 +648,14 @@
         (.delete f)
         (log/info "Snapshot deleted" {:path path})))))
 
-;; ──────────────────────────────────────────
-;; Introspection helpers
-;; ──────────────────────────────────────────
-
-(defn current-iteration
-  "Returns the index of the most recently completed iteration."
-  [run]
+(defn current-iteration [run]
   (count @(:iterations run)))
 
-(defn last-evidence
-  "Returns the evidence map for the most recently completed iteration."
-  [run]
+(defn last-evidence [run]
   (last @(:iterations run)))
 
 (defn run-summary
-  "Returns a plain map suitable for UI rendering — no atoms."
+  "Plain map for UI rendering — no atoms."
   [run]
   {:run-id         (:run-id run)
    :objective      (:objective run)

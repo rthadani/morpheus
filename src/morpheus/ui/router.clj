@@ -1,6 +1,6 @@
 (ns morpheus.ui.router
-  "Reitit ring router. All routes return hiccup rendered to HTML
-   except the SSE stream which returns text/event-stream."
+  "Reitit ring router. Routes return hiccup rendered to HTML, except the SSE
+   stream which returns text/event-stream."
   (:require
    [reitit.ring            :as ring]
    [ring.middleware.params :as params]
@@ -14,10 +14,6 @@
    [morpheus.executor.wiggum  :as wiggum]
    [morpheus.executor.store   :as store]
    [morpheus.ui.components    :as ui]))
-
-;; ──────────────────────────────────────────
-;; Helpers
-;; ──────────────────────────────────────────
 
 (defn html-resp [hiccup]
   {:status  200
@@ -40,18 +36,13 @@
      :body    with-css}))
 
 (defn sse-event
-  "Format a server-sent event string.
-   Handles multi-line data by prefixing each line with 'data: '."
+  "Multi-line SSE event — each line of data-html gets its own data: prefix."
   [event-name data-html]
   (let [data-lines (->> (str/split data-html #"\n")
                         (map #(str "data: " %))
                         (str/join "\n"))]
     (str "event: " event-name "\n"
          data-lines "\n\n")))
-
-;; ──────────────────────────────────────────
-;; SSE — DAG run fragments
-;; ──────────────────────────────────────────
 
 (defn- dag-fragment [run run-id event]
   (case (:type event)
@@ -61,7 +52,7 @@
           node      (first (filter #(= (:id %) (:node-id event)) nodes))]
       (when node
         (str ;; Replace the whole canvas div — individual <g> OOB swaps fail because
-             ;; HTMX parses them as HTML unknowns inside #sse-sink (a div), not as SVG
+             ;; HTMX parses them as HTML unknowns inside #sse-sink (a div), not as SVG.
              (h/html (update (ui/dag-canvas nodes state-map)
                              1 assoc :hx-swap-oob "outerHTML:#dag-canvas"))
              (when (= :running (:state event))
@@ -142,18 +133,13 @@
     nil))
 
 (defn- with-attr
-  "Adds an attribute to a hiccup vector whether or not it already has an
-   explicit attr map at index 1. Lets us tag a component returned by another
-   namespace with hx-swap-oob without forcing every component to declare an
-   empty {} attr map."
+  "Adds an attribute to a hiccup vector whether or not it has an explicit attr
+   map at index 1 — so we can tag a component with hx-swap-oob without forcing
+   every component to declare an empty {} attr map."
   [[tag & body :as h] k v]
   (if (map? (first body))
     (apply vector tag (assoc (first body) k v) (rest body))
     (apply vector tag {k v} body)))
-
-;; ──────────────────────────────────────────
-;; SSE — Wiggum run fragments
-;; ──────────────────────────────────────────
 
 (defn- wiggum-fragment [run-id event run-store]
   (case (:type event)
@@ -166,17 +152,13 @@
 
     :iteration-started
     (str (h/html
-           ;; hx-swap-oob applied directly to the panel's root element so the
-           ;; outerHTML swap doesn't create a wrapper-and-nested duplicate id.
+           ;; hx-swap-oob applied directly to the panel's root so outerHTML
+           ;; doesn't create a wrapper-and-nested duplicate id.
            (with-attr (ui/control-packet-panel (:control-packet event))
                       :hx-swap-oob "outerHTML"))
-         ;; replace the running-row placeholder (always present in DOM)
          (h/html
            (with-attr (ui/iteration-running-row run-id (:iteration event))
                       :hx-swap-oob "outerHTML"))
-         ;; auto-show live output in the detail panel immediately —
-         ;; same direct-attr pattern, otherwise we end up with nested
-         ;; #wg-detail elements after the first iteration.
          (h/html
            (with-attr (ui/iteration-live-panel (:iteration event))
                       :hx-swap-oob "outerHTML"))
@@ -186,23 +168,21 @@
 
     :iteration-complete
     (let [ev (:evidence event)]
-      (str ;; afterend FIRST — inserts sibling while #iter-row-running is still in DOM
-           ;; outerHTML SECOND — replaces it; afterend runs against the live element, not the detached one
+      (str ;; afterend FIRST inserts the sibling while #iter-row-running is in DOM;
+           ;; outerHTML SECOND replaces it. Order matters — afterend runs against
+           ;; the live element, not the detached one.
            (h/html
              (update (ui/iteration-row run-id ev) 1
                      assoc :hx-swap-oob "afterend:#iter-row-running"))
            (h/html
              [:div {:id "iter-row-running" :hx-swap-oob "outerHTML:#iter-row-running"}])
-           ;; update detail panel to show latest
            (h/html
              [:div {:hx-swap-oob "innerHTML:#wg-detail"}
               (ui/iteration-detail ev)])
-           ;; update iter count in topbar
            (h/html
              [:span {:id "wg-iter-count" :hx-swap-oob "outerHTML:#wg-iter-count"
                      :class "wg-iter"}
               (str "iter " (:iteration ev))])
-           ;; log line
            (h/html
              [:div {:id "log-tail" :hx-swap-oob "beforeend"}
               (ui/log-line (if (zero? (or (:exit-code ev) 0)) :ok :warn)
@@ -305,7 +285,6 @@
                      :hx-swap-oob "outerHTML:#run-status"
                      :class       (str "status-pill status-" (if done? "done" "aborted"))}
               (if done? "done" "aborted")])
-           ;; hide the review panel when run finishes
            (h/html
              [:div#review-panel {:hx-swap-oob "outerHTML:#review-panel" :style "display:none"}])
            (h/html
@@ -318,10 +297,6 @@
 
     nil))
 
-;; ──────────────────────────────────────────
-;; SSE — unified stream handler
-;; ──────────────────────────────────────────
-
 (defn stream-handler [run-store]
   (fn [{:keys [path-params] :as req}]
     (let [run-id (parse-long (:id path-params))
@@ -329,7 +304,6 @@
       (if-not run
         {:status 404 :body "Run not found"}
         (with-channel req ch
-          ;; Send SSE handshake headers immediately so the browser accepts the stream
           (send! ch {:status  200
                      :headers {"Content-Type"  "text/event-stream"
                                "Cache-Control" "no-cache"
@@ -339,13 +313,14 @@
                 rtype    (store/run-type run)
                 evt-name (if (= :wiggum rtype) "wiggum-update" "node-update")
                 mult     (:event-mult run)]
-            ;; Tap before replaying so we don't miss events between replay and live
+            ;; Tap before replaying so we don't miss events between replay and live.
             (async/tap mult tap-ch)
             (on-close ch (fn [_]
                            (log/debug "SSE client disconnected" run-id)
                            (async/untap mult tap-ch)
                            (async/close! tap-ch)))
-            ;; Replay past events for DAG runs — nodes may complete before the browser connects
+            ;; DAG runs: replay past events — nodes may have completed before
+            ;; the browser connected.
             (when (= :dag rtype)
               (doseq [event @(:event-log run)]
                 (try
@@ -354,10 +329,10 @@
                       (send! ch (sse-event evt-name fragment))))
                   (catch Exception e
                     (log/error e "SSE replay error" {:event-type (:type event)})))))
-            ;; For wiggum runs, the page already renders past iterations + the
-            ;; control packet at page-load time. The one piece that's missing
-            ;; on a refresh-while-paused is the review dialog. Replay just the
-            ;; most recent :run-paused event so the dialog reappears.
+            ;; Wiggum: page renders past iterations + control packet at load
+            ;; time; the only thing missing on a refresh-while-paused is the
+            ;; review dialog. Replay just the most recent :run-paused so the
+            ;; dialog reappears.
             (when (and (= :wiggum rtype) (= :paused @(:state run)))
               (when-let [pause-ev (->> @(:event-log run)
                                        (filter #(= :run-paused (:type %)))
@@ -379,10 +354,6 @@
                     (log/error e "SSE fragment error" {:event-type (:type event)})))
                 (recur)))))))))
 
-;; ──────────────────────────────────────────
-;; DAG — checkpoint action handler
-;; ──────────────────────────────────────────
-
 (defn checkpoint-handler [run-store]
   (fn [{:keys [path-params form-params]}]
     (let [run-id   (parse-long (:id path-params))
@@ -403,10 +374,6 @@
               :abort   [:div#checkpoint-panel.checkpoint-panel
                         [:div.cp-label "Run aborted."]])))))))
 
-;; ──────────────────────────────────────────
-;; DAG — node detail handler
-;; ──────────────────────────────────────────
-
 (defn node-detail-handler [run-store]
   (fn [{:keys [path-params]}]
     (let [run-id  (parse-long (:id path-params))
@@ -422,10 +389,6 @@
                             (get @(:output-buffers run) node-id)))]
           (html-resp (ui/node-detail node state output)))))))
 
-;; ──────────────────────────────────────────
-;; DAG — start run handler
-;; ──────────────────────────────────────────
-
 (defn start-run-handler [run-store]
   (fn [{:keys [body-params]}]
     (let [graph  (:graph body-params)
@@ -437,10 +400,6 @@
        :headers {"Location" (str "/runs/" run-id)}
        :body    (str run-id)})))
 
-;; ──────────────────────────────────────────
-;; Wiggum — start handler
-;; ──────────────────────────────────────────
-
 (defn start-wiggum-handler [run-store]
   (fn [{:keys [body-params]}]
     (let [run-id (System/currentTimeMillis)
@@ -451,10 +410,6 @@
       {:status  201
        :headers {"Location" (str "/runs/" run-id)}
        :body    (str run-id)})))
-
-;; ──────────────────────────────────────────
-;; Wiggum — iteration control handlers
-;; ──────────────────────────────────────────
 
 (defn wiggum-resume-handler [run-store]
   (fn [{:keys [path-params form-params]}]
@@ -470,7 +425,6 @@
           (wiggum/resume! run {:action    action
                                :feedback  feedback
                                :overrides overrides})
-          ;; hide the review panel immediately on submit
           (html-resp [:div#review-panel {:style "display:none"}]))))))
 
 (defn steer-handler [run-store]
@@ -515,10 +469,6 @@
         (do (wiggum/auto! run)
             (html-resp (ui/step-toggle run-id false)))))))
 
-;; ──────────────────────────────────────────
-;; Run page — dispatches on run type
-;; ──────────────────────────────────────────
-
 (defn run-page-handler [run-store]
   (fn [{:keys [path-params]}]
     (let [run-id (parse-long (:id path-params))
@@ -544,10 +494,6 @@
         ev          (html-resp (ui/iteration-detail ev))
         live-output (html-resp [:pre#live-output.iter-output.iter-output-live live-output])
         :else       {:status 404 :body "Iteration not found"}))))
-
-;; ──────────────────────────────────────────
-;; Router
-;; ──────────────────────────────────────────
 
 (defn css-handler [_]
   (if-let [r (io/resource "public/style.css")]
