@@ -121,9 +121,9 @@
            :hx-swap  "innerHTML"}
      [:div.iter-row-top
       [:span.iter-row-num (str "#" iteration)]
-      [:span {:class (str "iter-badge " (if ver-ok? "badge-ok" "badge-fail"))}
-       (if ver-ok? "✓" "✗")]
-      (when slop? [:span.iter-badge.badge-warn "⚠"])
+      [:span {:class (str "iter-badge " (if ver-ok? "badge-ok" "badge-next"))}
+       (if ver-ok? "verified" "next iter")]
+      (when slop? [:span.iter-badge.badge-warn "slop"])
       [:span.iter-row-dur (str secs "s")]]
      [:div.iter-row-files
       (when (seq files-written) [:span.files-new (str "+" (count files-written) " new")])

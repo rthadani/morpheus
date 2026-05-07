@@ -4,7 +4,7 @@
    Usage:
      clj -M:run <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]
 
-   Run type is auto-detected: :graph/nodes → DAG, :objective → Wiggum.
+   Run type is auto-detected: :graph/nodes -> DAG, :objective -> Wiggum.
 
    Exit codes: 0 success, 1 aborted/failed, 2 unknown."
   (:require
@@ -47,13 +47,13 @@
 (defn- print-event [event]
   (case (:type event)
     :run-started
-    (println "▶  Run started")
+    (println "Run started")
 
     :iteration-started
     (do
       (when (= 1 (:iteration event))
-        (println (str "   work-dir → " (:work-dir event))))
-      (println (str "\n→  Iteration " (:iteration event) " starting…")))
+        (println (str "  work-dir: " (:work-dir event))))
+      (println (str "\nIteration " (:iteration event) " starting")))
 
     :iteration-complete
     (let [ev (:evidence event)]
@@ -64,59 +64,59 @@
       (when-let [slop (:slop-signals ev)]
         (when (or (:helpers-added? slop) (:only-new-files? slop)
                   (> (:new-file-ratio slop 0) 70))
-          (println (str "   ⚠  slop: new-ratio=" (:new-file-ratio slop) "%"
+          (println (str "  slop: new-ratio=" (:new-file-ratio slop) "%"
                         (when (:helpers-added? slop)  " helpers-added")
                         (when (:only-new-files? slop) " only-new-files")))))
       (when-let [v (:verification ev)]
-        (println (str "   verify: "
-                      (if (zero? (:exit v)) "✓ passed"
-                          (str "✗ exit=" (:exit v))))))
+        (println (str "  verify: "
+                      (if (zero? (:exit v)) "passed"
+                          (str "fail exit=" (:exit v))))))
       (when-let [r (:review ev)]
-        (println (str "   judge: score=" (:score r)
+        (println (str "  judge: score=" (:score r)
                       "  rec="  (name (:recommendation r))
-                      (when-let [s (:summary r)] (str "  — " s))))
+                      (when-let [s (:summary r)] (str " - " s))))
         (doseq [v (:violations r)]
-          (println (str "     [" (name (:severity v)) "] " (:file v)
-                        " (" (name (:type v)) ") — " (:reason v))))))
+          (println (str "    [" (name (:severity v)) "] " (:file v)
+                        " (" (name (:type v)) ") - " (:reason v))))))
 
     :run-paused
     (do
-      (println (str "\n⏸  Paused after iteration " (:iteration event)
+      (println (str "\nPaused after iteration " (:iteration event)
                     (cond
-                      (:review-pause? event) "  ⚠ judge requested review"
-                      (:verified? event)     "  ✓ verified"
-                      :else                  "  ✗ not verified")))
+                      (:review-pause? event) "  judge requested review"
+                      (:verified? event)     "  verified"
+                      :else                  "  not verified")))
       (when-let [r (:review event)]
-        (println (str "   judge: score=" (:score r)
+        (println (str "  judge: score=" (:score r)
                       "  rec="  (name (:recommendation r))
-                      (when-let [s (:summary r)] (str "  — " s))))
+                      (when-let [s (:summary r)] (str " - " s))))
         (doseq [v (:violations r)]
-          (println (str "     [" (name (:severity v)) "] " (:file v)
-                        " (" (name (:type v)) ") — " (:reason v))))))
+          (println (str "    [" (name (:severity v)) "] " (:file v)
+                        " (" (name (:type v)) ") - " (:reason v))))))
 
     :provider-fallback
-    (println (str "⚠  Rate limit — retrying with " (:fallback event)
+    (println (str "Rate limit - retrying with " (:fallback event)
                   " (after " (:delay-ms event) "ms)"))
 
     :node-complete
-    (println (str "   ✓ " (name (:node-id event)) " (" (:duration event) "ms)"))
+    (println (str "  done " (name (:node-id event)) " (" (:duration event) "ms)"))
 
     :node-error
-    (println (str "   ✗ " (name (:node-id event)) " — " (:message event)))
+    (println (str "  fail " (name (:node-id event)) " - " (:message event)))
 
     :checkpoint
-    (println (str "\n⏸  Checkpoint: " (name (:node-id event))))
+    (println (str "\nCheckpoint: " (name (:node-id event))))
 
     :run-complete
-    (println (str "\n✅ Done"
-                  (when-let [r (:reason event)]  (str " — " (name r)))
+    (println (str "\nDone"
+                  (when-let [r (:reason event)]  (str " - " (name r)))
                   (when-let [i (:iteration event)] (str " (" i " iterations)"))))
 
     :run-aborted
-    (println "\n✗  Run aborted")
+    (println "\nRun aborted")
 
     :run-error
-    (println (str "\n💥 Run crashed — " (:message event)))
+    (println (str "\nRun crashed - " (:message event)))
 
     (:state-change :control-changed) nil
 
@@ -152,7 +152,7 @@
               ;; Wiggum pause is driven by the web UI dialog; the CLI just
               ;; keeps consuming events.
               :run-paused
-              (do (println "   → respond in the UI to continue or restore")
+              (do (println "  respond in the UI to continue or restore")
                   (recur))
 
               :run-complete :ok
@@ -186,7 +186,7 @@
             port      (or (some-> (System/getenv "PORT") parse-long) 7777)
             run       (store/load-ui-state! run-store project-dir)]
         (if run
-          (do (println (str "UI → http://localhost:" port "/runs/" (:run-id run)))
+          (do (println (str "UI: http://localhost:" port "/runs/" (:run-id run)))
               (println "Press Ctrl-C to stop.")
               (.addShutdownHook (Runtime/getRuntime) (Thread. #(sys/stop!)))
               @(promise))
@@ -219,7 +219,7 @@
                                    (assoc (:graph/params raw {}) :project-dir project-dir)))))
 
             _         (store/add-run! run-store run)
-            _         (println (str "UI → http://localhost:" port "/runs/" run-id))
+            _         (println (str "UI: http://localhost:" port "/runs/" run-id))
             result    (event-loop! run rtype)
             work-dir  (when (= :wiggum rtype) @(:work-dir run))]
 
@@ -229,7 +229,7 @@
             (shell/sh "sh" "-c"
                       (str "cp -r " work-dir "/. " dest "/")
                       :dir work-dir)
-            (println (str "Output copied → " dest))))
+            (println (str "Output copied to " dest))))
 
         (sys/stop!)
         (shutdown-agents)

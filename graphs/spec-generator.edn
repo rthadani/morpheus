@@ -1,0 +1,312 @@
+;; Wiggum spec generator
+;;
+;; Takes a one-line description and produces a filled implementation spec
+;; in EDN format, ready to run as its own Wiggum loop.
+;;
+;; Usage:
+;;   1. Set :description below — one line describing what to build.
+;;      Optionally append a provider keyword: :ollama  :kimi  :anthropic (default)
+;;      Examples:
+;;        "A CLI tool that watches a directory and prints new file summaries"
+;;        "An HTMX todo app in Clojure with SQLite :ollama"
+;;        "A Kafka consumer lag monitor dashboard :kimi"
+;;   2. Run: clj -M:run graphs/spec-generator.edn --project-dir ./spec-out
+;;   3. Output: spec-out/output/<slug>.edn — review, then run it.
+
+{:objective
+ "You are a spec writer for a Clojure-based agent build system called Wiggum.
+  Read the description and produce a single output EDN file that Wiggum can
+  run directly to build the described system.
+
+  Description:
+  <<<REPLACE THIS WITH YOUR ONE-LINE DESCRIPTION>>>
+
+  === Phase 1: Analyse the description ===
+
+  Write your analysis to STDOUT before touching any file.  Cover:
+
+  1. Core deliverable — what gets built, what it does
+  2. Inferred stack — language, frameworks, persistence; justify each choice
+  3. Complexity classification — pick exactly one:
+       SIMPLE   single script or utility, 1-2 files, no server, no persistence
+       MEDIUM   full-stack app or service, 2-4 phases, standard persistence
+       COMPLEX  multi-service system, 5+ phases, distributed concerns, architecture decisions
+  4. Provider — scan the description for a trailing provider keyword:
+       :ollama      local inference via Ollama REST API (http://localhost:11434)
+       :kimi        Kimi (Moonshot AI) API
+       :anthropic   Anthropic Claude API (default if no keyword present)
+     Strip the keyword from the description before using it as the objective title.
+  5. Proposed phases and order
+  6. Proposed :success-check command
+  7. Ambiguities and how you resolved them
+
+  === Phase 2: Choose models ===
+
+  Based on complexity classification and provider, select models for all four
+  model fields in the output spec.  Use this table:
+
+  ┌────────────┬──────────────┬────────────────────────────┬──────────────────────────────┐
+  │ Provider   │ Complexity   │ :executor-model-config      │ :supervisor-model-config     │
+  ├────────────┼──────────────┼────────────────────────────┼──────────────────────────────┤
+  │ :anthropic │ SIMPLE       │ claude-haiku-4-5-20251001  │ claude-sonnet-4-6            │
+  │ :anthropic │ MEDIUM       │ claude-sonnet-4-6          │ claude-sonnet-4-6            │
+  │ :anthropic │ COMPLEX      │ claude-sonnet-4-6          │ claude-opus-4-5              │
+  ├────────────┼──────────────┼────────────────────────────┼──────────────────────────────┤
+  │ :ollama    │ SIMPLE       │ qwen2.5-coder:7b           │ qwen2.5-coder:14b            │
+  │ :ollama    │ MEDIUM       │ qwen2.5-coder:14b          │ qwen2.5-coder:32b            │
+  │ :ollama    │ COMPLEX      │ qwen2.5-coder:32b          │ qwen2.5-coder:32b            │
+  ├────────────┼──────────────┼────────────────────────────┼──────────────────────────────┤
+  │ :kimi      │ SIMPLE       │ moonshot-v1-8k             │ moonshot-v1-32k              │
+  │ :kimi      │ MEDIUM       │ moonshot-v1-32k            │ moonshot-v1-128k             │
+  │ :kimi      │ COMPLEX      │ moonshot-v1-128k           │ moonshot-v1-128k             │
+  └────────────┴──────────────┴────────────────────────────┴──────────────────────────────┘
+
+  Also set :fallback-model:
+    :anthropic → \"claude-haiku-4-5-20251001\"
+    :ollama    → \"qwen2.5-coder:7b\"
+    :kimi      → \"moonshot-v1-8k\"
+
+  For :ollama configs add :provider :ollama to both model config maps.
+  For :kimi configs add :provider :kimi to both model config maps.
+  :anthropic is the default — no :provider key needed.
+
+  Also set :max-iterations from complexity:
+    SIMPLE  → 8
+    MEDIUM  → 20
+    COMPLEX → 35
+
+  === Phase 3: Write the spec file ===
+
+  Create output/ if absent.  Write output/<slug>.edn where <slug> is a
+  kebab-case identifier derived from the description (provider keyword excluded).
+
+  The file must be a valid EDN map with exactly these keys in this order:
+
+    :objective          — what to build, phase by phase.
+                          Use === Phase N: name === headings.
+                          Be specific: file names, API routes, data shapes,
+                          test expectations.
+
+                          If the description implies any UI (web app, dashboard,
+                          CLI with output, chart, form, admin panel — anything
+                          a human will look at) the objective MUST include a
+                          dedicated visual phase BEFORE the implementation phase
+                          that references it:
+
+                            === Phase N: Visual reference ===
+                            Produce a screenshot mockup of the UI as an HTML file
+                            at output/mockup.html before writing any application code.
+                            The mockup must show the full layout, colour palette,
+                            component shapes, and interaction states.
+                            Subsequent phases must match this mockup exactly —
+                            no CSS values in later phases, just 'match mockup.html'.
+
+                          The visual phase must come early (after skeleton, before
+                          core logic) so the executor has a reference before it
+                          writes any templates or stylesheets.
+                          Non-UI deliverables (CLI scripts, data pipelines, libraries)
+                          do not need a visual phase.
+
+                          End with a Documentation phase covering README.md.
+
+    :project-dir        — nil
+
+    :success-check      — shell one-liner that exits 0 only when the build
+                          is genuinely working end-to-end.
+                          Hard rules:
+                            Never bare & — always setsid ... &
+                            Never kill $SERVER_PID — always fuser -k <port>/tcp
+                            docker build runs once at end, not every iteration
+                            Tests must not call real external services
+                          If a visual phase is present, include:
+                            test -f output/mockup.html
+
+    :constraints        — vector of strings.  Always include:
+                            'Work phase by phase — do not start phase N+1
+                             until phase N tests pass'
+                            'Run the test suite at the end of every iteration'
+                          If a UI is involved, always add:
+                            'Produce output/mockup.html in the visual phase before
+                             writing any application templates or stylesheets'
+                            'All UI phases after the visual phase must reference
+                             mockup.html — do not write CSS values in the objective'
+                          Add further stack-specific constraints.
+
+    :anti-goals         — vector of strings.  Always include:
+                            'Do not add dependencies not listed in the objective'
+                            'Do not leave TODO comments or unimplemented stubs'
+                          If a UI is involved, always add:
+                            'Do not describe UI layout or colours in prose in the
+                             objective — the mockup file is the specification'
+                          Add domain-specific anti-goals.
+
+    :max-iterations     — integer from Phase 2 model selection
+
+    :step-once?         — false
+
+    :generate-claude-md? — false
+
+    :review?            — true
+
+    :fallback-model     — string from Phase 2 model selection
+
+    :fallback-delay-ms  — 20000
+
+    :executor-model-config  — map from Phase 2; include :provider if non-Anthropic
+
+    :supervisor-model-config — map from Phase 2; include :provider if non-Anthropic
+
+  === Phase 4: Validate ===
+
+  1. cat output/<slug>.edn to verify it looks correct
+  2. clojure -e '(read-string (slurp \"output/<slug>.edn\"))' — must exit 0
+  3. Grep checks — all must pass:
+       grep -q ':objective'          output/<slug>.edn
+       grep -q ':success-check'      output/<slug>.edn
+       grep -q ':constraints'        output/<slug>.edn
+       grep -q ':anti-goals'         output/<slug>.edn
+       grep -q ':max-iterations'     output/<slug>.edn
+       grep -q 'generate-claude-md'  output/<slug>.edn
+       grep -q ':executor-model'     output/<slug>.edn
+       grep -q ':supervisor-model'   output/<slug>.edn
+  4. If description implies a UI:
+       grep -q 'mockup.html'         output/<slug>.edn
+       grep -q 'Visual reference'    output/<slug>.edn
+  5. Anti-pattern checks — all must be absent:
+       ! grep -q 'kill \$SERVER_PID' output/<slug>.edn
+       ! grep -q 'CSS\|color:\|px;\|border-radius' output/<slug>.edn
+  6. Print summary line:
+       Spec written: output/<slug>.edn
+       Provider: <provider>  Complexity: <complexity>
+       Executor: <executor-model-id>  Supervisor: <supervisor-model-id>
+       Phases: <N>  Visual phase: yes/no  Max-iterations: <N>
+
+  === Reference spec (study the style — match it exactly) ===
+
+  {:objective
+   \"Build a full-stack Kanban board application.
+
+    === Phase 1: Skeleton ===
+    - Vite + React + TypeScript project scaffold
+    - Express + TypeScript server on port 3001
+    - SQLite via better-sqlite3 at db/kanban.db
+    - Single passing test in each of Vitest and Jest
+
+    === Phase 2: Visual reference ===
+    Produce output/mockup.html — a static HTML file showing the full Kanban UI:
+    board with three columns (To Do, In Progress, Done), cards in each column,
+    add-card and add-list controls, drag handle indicators, colour palette,
+    and typography. No application logic — appearance only.
+    All subsequent UI phases must match this file. No CSS values in later phases.
+
+    === Phase 3: React frontend ===
+    Implement the UI from mockup.html.
+    - Named lists side-by-side; add, rename, delete lists and cards
+    - Drag-and-drop via HTML5 DnD API — no library
+    - Vitest + React Testing Library covering all CRUD operations
+
+    === Phase 4: Backend + API ===
+    - REST: GET /api/health, GET /api/boards/:id,
+      POST/PATCH/DELETE /api/lists, POST/PATCH/DELETE /api/cards
+    - Jest + supertest for all endpoints
+
+    === Phase 5: Docker deploy ===
+    - Multi-stage Dockerfile; docker-compose.yml port 3001:3001
+
+    === Phase 6: Documentation ===
+    - README.md: summary, install, usage\"
+
+   :project-dir nil
+
+   :success-check
+   \"npm test && npm run build &&
+    test -f output/mockup.html &&
+    podman-compose up --build -d && sleep 8 &&
+    curl -sf http://localhost:3001/api/health &&
+    podman-compose down &&
+    test -f README.md\"
+
+   :constraints
+   [\"Work phase by phase — do not start phase N+1 until phase N tests pass\"
+    \"Run npm test and npm run build at the end of every iteration\"
+    \"Produce output/mockup.html in Phase 2 before writing any React components\"
+    \"All UI phases after Phase 2 must reference mockup.html — no CSS values in the objective\"
+    \"Keep all board state in a single useKanban hook\"]
+
+   :anti-goals
+   [\"Do not install react-beautiful-dnd or any drag-and-drop library\"
+    \"Do not use an ORM — use better-sqlite3 with prepared statements\"
+    \"Do not add dependencies beyond what is listed in the objective\"
+    \"Do not leave TODO comments or unimplemented stubs\"
+    \"Do not describe UI layout or colours in prose in the objective — mockup.html is the specification\"]
+
+   :max-iterations      25
+   :step-once?          false
+   :generate-claude-md? false
+   :review?             true
+   :fallback-model    \"claude-haiku-4-5-20251001\"
+   :fallback-delay-ms 20000
+   :executor-model-config
+   {:model-id    \"claude-sonnet-4-6\"
+    :temperature 0.2
+    :max-tokens  8192}
+   :supervisor-model-config
+   {:model-id    \"claude-sonnet-4-6\"
+    :temperature 0.2
+    :max-tokens  4096}}"
+
+ :project-dir nil
+
+ :success-check
+ "test -d output && test -f output/*.edn &&
+  SPEC=$(ls output/*.edn | head -1) &&
+  clojure -e \"(read-string (slurp \\\"$SPEC\\\"))\" &&
+  grep -q ':objective'         $SPEC &&
+  grep -q ':success-check'     $SPEC &&
+  grep -q ':constraints'       $SPEC &&
+  grep -q ':anti-goals'        $SPEC &&
+  grep -q ':max-iterations'    $SPEC &&
+  grep -q 'generate-claude-md' $SPEC &&
+  grep -q ':executor-model'    $SPEC &&
+  grep -q ':supervisor-model'  $SPEC &&
+  ! grep -q 'kill \$SERVER_PID' $SPEC &&
+  ! grep -qE 'color:|border-radius:|font-size:|#[0-9a-fA-F]{3,6}' $SPEC &&
+  echo OK"
+
+ :constraints
+ ["Write the Phase 1 analysis to STDOUT before creating any file"
+  "Model selection in Phase 2 must follow the table exactly — do not freestyle model IDs"
+  "The provider keyword in the description (:ollama :kimi :anthropic) must be stripped from the slug and the objective title but must drive model selection"
+  "All four model fields must be set — executor, supervisor, fallback-model, fallback-delay-ms"
+  "Non-Anthropic model configs must include a :provider key in the map"
+  "If the description implies any UI, the output spec must include a visual phase that produces output/mockup.html before any implementation phase"
+  "The output spec must never contain CSS values, colour hex codes, or layout measurements — the mockup file is the specification for all UI concerns"
+  "The output file must parse as valid EDN before declaring done"
+  "Create the output/ directory if it does not exist"]
+
+ :anti-goals
+ ["Do not invent model IDs not listed in the Phase 2 table"
+  "Do not include the provider keyword (:ollama :kimi :anthropic) in the output spec slug or title"
+  "Do not produce anything other than the analysis and the single output EDN file"
+  "Do not write placeholder values — every field must be fully filled in"
+  "Do not wrap the EDN in markdown code fences — the file must be raw EDN"
+  "Do not set :generate-claude-md? to true — this is a single-output spec, not a full project"
+  "Do not write CSS, colour values, or layout descriptions in the output spec :objective — that belongs in the mockup file"]
+
+ :max-iterations      6
+ :step-once?          false
+ :generate-claude-md? false
+ :review?             true
+
+ :fallback-model    "claude-haiku-4-5-20251001"
+ :fallback-delay-ms 20000
+
+ :executor-model-config
+ {:model-id    "claude-sonnet-4-6"
+  :temperature 0.3
+  :max-tokens  8192}
+
+ :supervisor-model-config
+ {:model-id    "claude-sonnet-4-6"
+  :temperature 0.2
+  :max-tokens  4096}}
