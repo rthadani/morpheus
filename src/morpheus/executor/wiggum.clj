@@ -60,6 +60,7 @@
      :live-output    (atom "")
      :event-log      (atom [])
      :state          (atom :pending)
+     :max-iters      (atom (or (:max-iterations run-config) 20))
      :control        (atom {:step-once? (boolean (:step-once? run-config false))})
      :event-ch       event-ch
      :event-mult     (async/mult event-ch)
@@ -422,6 +423,7 @@
                                {:mode           (or (:judge-mode config) :code)
                                 :objective      (:objective control-packet)
                                 :expected-files expected
+                                :expected-check expected-check
                                 :constraints    (:constraints control-packet)
                                 :anti-goals     (:anti-goals control-packet)
                                 :files-written  (:files-written ev0)
@@ -542,14 +544,41 @@
     :retry-with-overrides
     [:recur iteration (merge control-packet (:overrides action))]
 
-    (if (:verified? ctx)
-      (do (commit-phase!)
-          (finish-run! run run-config work-dir :verified iteration)
-          [:done])
-      (do (commit-phase!)
-          [:recur (inc iteration)
-                  (next-packet-after-step run run-config control-packet
-                                          initial-state action)]))))
+    ;; Same as default :step but strips the judge's review from the latest
+    ;; iteration's evidence — the supervisor won't see the judge complaints
+    ;; when planning the next packet. For when the judge is stuck or wrong.
+    :ignore
+    (let [feedback (when (seq (:feedback action)) (:feedback action))]
+      (swap! (:iterations run)
+             (fn [iters]
+               (if (seq iters)
+                 (update iters (dec (count iters)) dissoc :review)
+                 iters)))
+      (if (and (:verified? ctx) (not feedback))
+        (do (commit-phase!)
+            (finish-run! run run-config work-dir :verified iteration)
+            [:done])
+        (do (commit-phase!)
+            (when feedback
+              (swap! (:max-iters run) max (inc iteration)))
+            [:recur (inc iteration)
+                    (next-packet-after-step run run-config control-packet
+                                            initial-state action)])))
+
+    (let [feedback (when (seq (:feedback action)) (:feedback action))]
+      ;; If the human supplied feedback, they expect another iteration to act
+      ;; on it — do not auto-terminate on verified, and bump the iteration
+      ;; cap if the next iteration would exceed it.
+      (if (and (:verified? ctx) (not feedback))
+        (do (commit-phase!)
+            (finish-run! run run-config work-dir :verified iteration)
+            [:done])
+        (do (commit-phase!)
+            (when feedback
+              (swap! (:max-iters run) max (inc iteration)))
+            [:recur (inc iteration)
+                    (next-packet-after-step run run-config control-packet
+                                            initial-state action)])))))
 
 (defn- emit-pause!
   "Marks the run paused and announces it. The actual `<! resume-ch` happens
@@ -568,8 +597,7 @@
   [run-id run-config]
   (let [run-config (render-run-config run-config)
         run        (create-run run-id run-config)
-        snapshot   (load-snapshot run-config)
-        max-iters  (or (:max-iterations run-config) 20)]
+        snapshot   (load-snapshot run-config)]
     (go
       (set-state! run :running)
       (try
@@ -579,7 +607,7 @@
                  control-packet start-packet]
             (reset! (:control-packet run) control-packet)
             (cond
-              (> iteration max-iters)
+              (> iteration @(:max-iters run))
               (do (set-state! run :done)
                   (emit! run {:type :run-complete :reason :max-iterations
                               :iterations (dec iteration)}))

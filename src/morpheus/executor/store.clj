@@ -34,15 +34,17 @@
    :started-at (:started-at run)})
 
 (defn- wiggum-summary [run]
-  {:run-id         (:run-id run)
-   :type           :wiggum
-   :objective      (:objective run)
-   :state          @(:state run)
-   :iteration      (count @(:iterations run))
-   :control-packet @(:control-packet run)
-   :evidence-list  @(:iterations run)
-   :work-dir       @(:work-dir run)
-   :started-at     (:started-at run)})
+  (let [events (when-let [log (:event-log run)] @log)]
+    {:run-id           (:run-id run)
+     :type             :wiggum
+     :objective        (:objective run)
+     :state            @(:state run)
+     :iteration        (count @(:iterations run))
+     :control-packet   @(:control-packet run)
+     :evidence-list    @(:iterations run)
+     :work-dir         @(:work-dir run)
+     :started-at       (:started-at run)
+     :last-pause-event (->> events (filter #(= :run-paused (:type %))) last)}))
 
 (defn run-summary
   "Plain map for HTML rendering — no atoms. Works for DAG and Wiggum."

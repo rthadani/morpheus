@@ -319,6 +319,13 @@ body { background: var(--bg3); overflow: hidden; }
   border-bottom: 1px solid var(--amber);
   max-height: 55vh; overflow-y: auto;
 }
+/* Panel is always in the DOM (so the form/textarea is stable) but hides
+   when #review-meta has no content — the run isn't paused. */
+#review-panel:not(:has(#review-meta > *)) { display: none; }
+/* Restore and Ignore are only meaningful when the judge has a review. */
+.btn-restore, .btn-ignore { display: none; }
+#review-meta:has(.review-judge) ~ .review-form .btn-restore,
+#review-meta:has(.review-judge) ~ .review-form .btn-ignore { display: inline-block; }
 .review-header {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 16px;

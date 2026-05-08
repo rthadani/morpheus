@@ -226,10 +226,17 @@
      "}"]))
 
 (defn- review-prompt
-  [{:keys [mode objective expected-files constraints anti-goals
+  [{:keys [mode objective expected-files expected-check constraints anti-goals
            files-written files-edited files-deleted diff success-check]}]
   (let [{:keys [system rubric max-diff-chars]}
-        (get mode-config (or mode :code) (:code mode-config))]
+        (get mode-config (or mode :code) (:code mode-config))
+        present-set     (set (:present expected-check))
+        missing-set     (set (:missing expected-check))
+        touched-set     (into #{} (concat files-written files-edited))
+        ;; Files satisfied by earlier iterations — present now but not touched
+        ;; this iteration. The agent is NOT required to recreate them.
+        carried-over    (sort (remove touched-set present-set))
+        produced-now    (sort (filter touched-set present-set))]
     (->> [system
 
           (str "## Overall objective\n" objective)
@@ -238,10 +245,34 @@
             (str "## Overall success check (do not hold the agent to this for one iteration)\n`"
                  success-check "`"))
 
-          (str "## What THIS iteration was supposed to produce\n"
+          (str "## Expected files for THIS iteration\n"
                (if (seq expected-files)
                  (str/join "\n" (map #(str "- " %) expected-files))
                  "(no expected-files declared — judge leniently)"))
+
+          (when expected-check
+            (str "## Expected-files status (after this iteration)\n"
+                 (when (seq carried-over)
+                   (str "Already present from prior iterations (NOT a violation"
+                        " — agent is not required to recreate these):\n"
+                        (str/join "\n" (map #(str "  ✓ " %) carried-over))
+                        "\n"))
+                 (when (seq produced-now)
+                   (str "Produced or touched this iteration:\n"
+                        (str/join "\n" (map #(str "  ✓ " %) produced-now))
+                        "\n"))
+                 (when (seq missing-set)
+                   (str "MISSING (not present anywhere — flag as violation if"
+                        " the agent should have produced them):\n"
+                        (str/join "\n" (map #(str "  ✗ " %) (sort missing-set)))
+                        "\n"))
+                 "\nIMPORTANT: An empty diff or zero files-written this"
+                 " iteration is NOT automatically a failure. If every expected"
+                 " file is already present from a previous iteration, the"
+                 " agent was correctly told there was nothing to do. Score"
+                 " based on whether the cumulative state satisfies the"
+                 " objective — not on whether THIS specific iteration wrote"
+                 " bytes."))
 
           (when (seq constraints)
             (str "## Constraints the agent was told to obey\n"

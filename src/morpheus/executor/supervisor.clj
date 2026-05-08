@@ -175,9 +175,22 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
        (seq user-feedback)
        (conj (str "## Human reviewer feedback\n"
                   user-feedback "\n\n"
-                  "IMPORTANT: The human has reviewed this iteration and left the above "
-                  "feedback. Incorporate it directly into the next control packet. "
-                  "Their steering overrides your own assessment."))
+                  "IMPORTANT: The human's feedback above is the ONLY guidance to act on "
+                  "for this iteration. It overrides both your own assessment AND the "
+                  "default rules in the system prompt about how to handle judge "
+                  "violations.\n\n"
+                  "Do NOT automatically fold every judge violation into the next "
+                  "control packet. The judge's violation list is reference material "
+                  "the human used to decide what to ask for — treat it as context, "
+                  "not as a worklist. Address only the violations the human's "
+                  "feedback names or clearly implies (e.g. \"fix the 1st and 2nd\", "
+                  "\"address the medium ones\", \"ignore the auth issue\"). Leave any "
+                  "violation the human did not reference untouched for this "
+                  "iteration — it can be revisited later.\n\n"
+                  "If the human's feedback is broad or doesn't reference the judge "
+                  "(e.g. \"focus on tests\", \"continue\"), follow it directly and "
+                  "fall back to the default judge-handling rules only for "
+                  "violations that don't conflict with their direction."))
        :always
        (conj "## Your task"
              (str "Review the evidence above. Determine whether the executor is on track "

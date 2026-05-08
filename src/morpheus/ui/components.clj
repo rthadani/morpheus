@@ -236,6 +236,72 @@
              [:span.review-v-type (name (or type :other))]
              [:span.review-v-reason reason]])])])))
 
+(defn review-meta
+  "Header + judge block — the only piece that changes per pause event.
+   Returns hiccup for the contents of #review-meta. When this is empty the
+   parent #review-panel hides itself via CSS (:has selector)."
+  [pause-event latest-ev]
+  (let [{:keys [iteration milestone? review review-pause?]} pause-event
+        ver-ok? (or (nil? (:verification latest-ev))
+                    (zero? (:exit (:verification latest-ev))))
+        secs    (int (/ (or (:duration-ms latest-ev) 0) 1000))]
+    (list
+      [:div.review-header
+       [:span.review-title
+        (cond
+          review-pause? (str "⚠ Judge review · iteration " iteration)
+          milestone?    (str "⭐ Milestone · iteration " iteration)
+          :else         (str "⏸ Paused · iteration " iteration))]
+       (when latest-ev
+         [:div.review-summary
+          [:span {:class (str "exit-badge" (when (pos? (or (:exit-code latest-ev) 0)) " exit-nonzero"))}
+           (str "exit " (:exit-code latest-ev))]
+          [:span (str secs "s")]
+          (when (seq (:files-written latest-ev))
+            [:span.files-new (str "+" (count (:files-written latest-ev)) " new")])
+          (when (seq (:files-edited latest-ev))
+            [:span.files-edit (str "~" (count (:files-edited latest-ev)) " edited")])
+          [:span {:class (str "ver-inline " (if ver-ok? "ver-ok" "ver-fail"))}
+           (if ver-ok? "✓ verified" "✗ verify failed")]])]
+      (when review
+        (judge-review-block review)))))
+
+(defn review-panel
+  "Stable container rendered once on the page. The header/judge block
+   (#review-meta) is the only piece swapped on :run-paused events — the form
+   (with the textarea) is never re-rendered, so typing is never interrupted
+   by SSE replays or reconnects.
+
+   CSS hides the panel when #review-meta has no children (see style.css)."
+  [run-id pause-event latest-ev]
+  [:div#review-panel.review-panel
+   [:div#review-meta.review-meta
+    (when pause-event
+      (review-meta pause-event latest-ev))]
+   [:form.review-form
+    {:id        "review-form"
+     :hx-post   (str "/runs/" run-id "/resume")
+     :hx-target "#review-meta"
+     :hx-swap   "innerHTML"
+     ;; Reset the form (clears the textarea) once the submission lands. The
+     ;; meta is wiped server-side; this clears the still-present form fields.
+     :hx-on:htmx:after-request "this.reset()"}
+    [:textarea.review-feedback
+     {:id          "review-feedback-text"
+      :name        "feedback"
+      :rows        3
+      :placeholder "Steer the next iteration… e.g. \"Focus on the auth layer\" or leave blank to let the supervisor decide"}]
+    [:div.review-actions
+     [:button {:type "submit" :name "action" :value "abort"   :class "btn-danger"}  "Abort"]
+     [:button {:type "submit" :name "action" :value "restore" :class "btn-warn btn-restore"
+               :title "Discard this phase's changes and re-enter the phase"}
+      "Restore ⎌"]
+     [:button {:type "submit" :name "action" :value "ignore"  :class "btn btn-ignore"
+               :title "Drop the judge's review and continue — use when the judge is stuck or wrongly flagging issues"}
+      "Ignore judge ⤳"]
+     [:button {:type "submit" :name "action" :value "retry"   :class "btn"}         "Retry ↺"]
+     [:button {:type "submit" :name "action" :value "step"    :class "btn-primary"}  "Continue →"]]]])
+
 (defn control-packet-panel [packet]
   (let [{:keys [objective constraints success-check anti-goals brief]} (or packet {})]
     [:div#control-packet-panel
@@ -294,7 +360,9 @@
         packet        (:control-packet summary)
         evidence-list (:evidence-list summary [])
         step-once?    (get-in summary [:control :step-once?] false)
-        latest        (last evidence-list)]
+        latest        (last evidence-list)
+        pause-event   (:last-pause-event summary)
+        paused?       (= :paused state)]
     [:html
      [:head
       [:meta {:charset "utf-8"}]
@@ -317,7 +385,7 @@
         (step-toggle run-id step-once?)
         (abort-button run-id)]
 
-       [:div#review-panel {:style "display:none"}]
+       (review-panel run-id (when paused? pause-event) latest)
 
        [:div.wg-list
         [:div.wg-pane-header "Iterations"]

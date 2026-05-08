@@ -193,55 +193,15 @@
                                   (if (zero? (:exit v)) " ✓" " ✗"))))])))
 
     :run-paused
-    (let [run          (store/get-run run-store run-id)
-          latest-ev    (when run (last @(:iterations run)))
-          milestone?   (:milestone? event)
-          review       (:review event)
+    (let [run           (store/get-run run-store run-id)
+          latest-ev     (when run (last @(:iterations run)))
+          milestone?    (:milestone? event)
           review-pause? (:review-pause? event)]
+      ;; Swap only #review-meta — the form (and textarea) live in
+      ;; #review-panel and are never re-rendered, so typing is not disrupted.
       (str (h/html
-             [:div#review-panel.review-panel
-              {:hx-swap-oob "outerHTML:#review-panel"}
-              [:div.review-header
-               [:span.review-title
-                (cond
-                  review-pause? (str "⚠ Judge review · iteration " (:iteration event))
-                  milestone?    (str "⭐ Milestone · iteration " (:iteration event))
-                  :else         (str "⏸ Paused · iteration " (:iteration event)))]
-               (when latest-ev
-                 (let [ev      latest-ev
-                       ver-ok? (or (nil? (:verification ev))
-                                   (zero? (:exit (:verification ev))))
-                       secs    (int (/ (or (:duration-ms ev) 0) 1000))]
-                   [:div.review-summary
-                    [:span {:class (str "exit-badge" (when (pos? (or (:exit-code ev) 0)) " exit-nonzero"))}
-                     (str "exit " (:exit-code ev))]
-                    [:span (str secs "s")]
-                    (when (seq (:files-written ev))
-                      [:span.files-new (str "+" (count (:files-written ev)) " new")])
-                    (when (seq (:files-edited ev))
-                      [:span.files-edit (str "~" (count (:files-edited ev)) " edited")])
-                    [:span {:class (str "ver-inline " (if ver-ok? "ver-ok" "ver-fail"))}
-                     (if ver-ok? "✓ verified" "✗ verify failed")]]))]
-              (when review
-                (ui/judge-review-block review))
-              [:form.review-form
-               {:hx-post   (str "/runs/" run-id "/resume")
-                :hx-target "#review-panel"
-                :hx-swap   "outerHTML"}
-               [:textarea.review-feedback
-                {:id          "review-feedback-text"
-                 :name        "feedback"
-                 :rows        3
-                 :hx-preserve "true"
-                 :placeholder "Steer the next iteration… e.g. \"Focus on the auth layer\" or leave blank to let the supervisor decide"}]
-               [:div.review-actions
-                [:button {:type "submit" :name "action" :value "abort"   :class "btn-danger"}  "Abort"]
-                (when review
-                  [:button {:type "submit" :name "action" :value "restore" :class "btn-warn"
-                            :title "Discard this phase's changes and re-enter the phase"}
-                   "Restore ⎌"])
-                [:button {:type "submit" :name "action" :value "retry"   :class "btn"}         "Retry ↺"]
-                [:button {:type "submit" :name "action" :value "step"    :class "btn-primary"}  "Continue →"]]]])
+             [:div {:id "review-meta" :hx-swap-oob "innerHTML:#review-meta"}
+              (ui/review-meta event latest-ev)])
            (h/html
              [:div {:id "log-tail" :hx-swap-oob "beforeend"}
               (ui/log-line (if review-pause? :warn (if milestone? :info :warn))
@@ -329,10 +289,13 @@
                       (send! ch (sse-event evt-name fragment))))
                   (catch Exception e
                     (log/error e "SSE replay error" {:event-type (:type event)})))))
-            ;; Wiggum: page renders past iterations + control packet at load
-            ;; time; the only thing missing on a refresh-while-paused is the
-            ;; review dialog. Replay just the most recent :run-paused so the
-            ;; dialog reappears.
+            ;; Wiggum: replay the most recent :run-paused if the run is
+            ;; currently paused. Necessary because the live event can be
+            ;; missed across SSE reconnects (htmx tears down and re-opens
+            ;; the EventSource on any blip; events fired during the gap
+            ;; never reach this go-loop). The OOB swap is idempotent against
+            ;; the inline panel rendered by wiggum-shell-page, and the
+            ;; textarea has hx-preserve so its content survives the swap.
             (when (and (= :wiggum rtype) (= :paused @(:state run)))
               (when-let [pause-ev (->> @(:event-log run)
                                        (filter #(= :run-paused (:type %)))
@@ -425,7 +388,11 @@
           (wiggum/resume! run {:action    action
                                :feedback  feedback
                                :overrides overrides})
-          (html-resp [:div#review-panel {:style "display:none"}]))))))
+          ;; Form targets #review-meta with innerHTML; empty body hides the
+          ;; panel via CSS (#review-panel:not(:has(#review-meta > *)) → none).
+          {:status  200
+           :headers {"Content-Type" "text/html; charset=utf-8"}
+           :body    ""})))))
 
 (defn steer-handler [run-store]
   (fn [{:keys [path-params form-params]}]
