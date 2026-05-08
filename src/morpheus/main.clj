@@ -3,6 +3,7 @@
 
    Usage:
      clj -M:run <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]
+     java -jar morpheus.jar <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]
 
    Run type is auto-detected: :graph/nodes -> DAG, :objective -> Wiggum.
 
@@ -166,18 +167,28 @@
         (async/untap (:event-mult run) tap-ch)
         (async/close! tap-ch)))))
 
+(defn- invocation
+  "Best-effort detection of how the user launched the process, so the usage
+   message matches what they typed. Falls back to `clj -M:run`."
+  []
+  (let [cmd (or (System/getProperty "sun.java.command") "")]
+    (if (re-find #"\.jar(\s|$)" cmd)
+      (str "java -jar " (or (re-find #"\S+\.jar" cmd) "morpheus.jar"))
+      "clj -M:run")))
+
 (defn -main [& args]
   (let [{:keys [edn-file project-dir step-once? max-iterations view-only?]
          :as   opts} (parse-args args)]
 
     (when-not (or edn-file (and view-only? project-dir))
-      (println "Usage: clj -M:run <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]")
-      (println "       clj -M:run --view --project-dir <path>")
-      (println)
-      (println "Examples:")
-      (println "  clj -M:run graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react")
-      (println "  clj -M:run graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step")
-      (println "  clj -M:run --view --project-dir /tmp/todo-react")
+      (let [cmd (invocation)]
+        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]"))
+        (println (str "       " cmd " --view --project-dir <path>"))
+        (println)
+        (println "Examples:")
+        (println (str "  " cmd " graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react"))
+        (println (str "  " cmd " graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step"))
+        (println (str "  " cmd " --view --project-dir /tmp/todo-react")))
       (System/exit 1))
 
     (when view-only?
