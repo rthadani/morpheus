@@ -29,7 +29,21 @@
    [morpheus.executor.judge        :as judge]
    [morpheus.executor.llm          :as llm]
    [morpheus.executor.store        :as store]
-   [morpheus.executor.supervisor   :as supervisor]))
+   [morpheus.executor.supervisor   :as supervisor]
+   [morpheus.graph.context         :as graph-ctx]))
+
+(defn- render-run-config
+  "Substitutes {{slot}} placeholders in :objective and :acceptance-criteria
+   using other top-level keys of the run-config as the slot values. Lets a
+   spec author hoist a :description (or any other) key out of the long
+   :objective string and reference it via {{description}}."
+  [run-config]
+  (let [slot-vals (into {} (filter (comp string? val) run-config))]
+    (cond-> run-config
+      (string? (:objective run-config))
+      (update :objective graph-ctx/render-prompt slot-vals)
+      (string? (:acceptance-criteria run-config))
+      (update :acceptance-criteria graph-ctx/render-prompt slot-vals))))
 
 (defn create-run
   "Returns a fresh Wiggum run map. All mutable state in atoms."
@@ -398,12 +412,15 @@
           phase-ended?     (or (empty? expected)
                                (empty? (:missing expected-check)))
           ev0              (evidence/build iteration cc-result verification top-level tree expected-check)
+          review-disabled? (or (= :none (:review-threshold config))
+                               (false? (:review? config)))   ; legacy alias
           review           (when (and phase-ended?
-                                      (not (false? (:review? config))))
+                                      (not review-disabled?))
                              (judge/review!
                                (or (:supervisor-model-config config)
                                    (:model-config config {}))
-                               {:objective      (:objective control-packet)
+                               {:mode           (or (:judge-mode config) :code)
+                                :objective      (:objective control-packet)
                                 :expected-files expected
                                 :constraints    (:constraints control-packet)
                                 :anti-goals     (:anti-goals control-packet)
@@ -549,9 +566,10 @@
    mode. Auto-resumes from project-dir/morpheus-run-snapshot.edn when the
    work-dir from that snapshot still exists."
   [run-id run-config]
-  (let [run       (create-run run-id run-config)
-        snapshot  (load-snapshot run-config)
-        max-iters (or (:max-iterations run-config) 20)]
+  (let [run-config (render-run-config run-config)
+        run        (create-run run-id run-config)
+        snapshot   (load-snapshot run-config)
+        max-iters  (or (:max-iterations run-config) 20)]
     (go
       (set-state! run :running)
       (try

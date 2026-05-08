@@ -73,19 +73,16 @@
  :max-iterations      20
  :step-once?          false
  :generate-claude-md? true
- :review?             false
+ :judge-mode          :code
+ :review-threshold    :none    ; skip the judge entirely
 
  :fallback-model    "claude-haiku-4-5-20251001"
  :fallback-delay-ms 20000
 
  ;; Executor uses Haiku (fast, cheap) — builds the code
  :executor-model-config
- {:model-id    "claude-sonnet-4-6"
-  :temperature 0.2
-  :max-tokens  8192}
+ {:model-id "claude-sonnet-4-6"}
 
  ;; Supervisor uses Sonnet — must reason across phases and steer correctly
  :supervisor-model-config
- {:model-id "claude-sonnet-4-6"
-  :temperature 0.2
-  :max-tokens  4096}}
+ {:model-id "claude-sonnet-4-6"}}

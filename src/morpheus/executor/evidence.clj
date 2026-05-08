@@ -61,10 +61,30 @@
      :dir-tree       dir-tree
      :expected-check expected-check}))
 
+(defn- format-review [{:keys [recommendation score summary violations]}]
+  (let [grouped  (group-by :severity violations)
+        bullet   (fn [v] (str "      - [" (name (:type v :other)) "]"
+                              (when-let [f (not-empty (:file v))] (str " " f))
+                              " — " (:reason v)))
+        sev-block (fn [label sev]
+                    (when-let [vs (seq (get grouped sev))]
+                      (str "    " label " (" (count vs) "):\n"
+                           (str/join "\n" (map bullet vs)))))]
+    (str "  Judge review  : recommendation=" (name (or recommendation :continue))
+         (when score (str " score=" score)) "\n"
+         (when (seq summary)    (str "    summary: " summary "\n"))
+         (when-let [b (sev-block "HIGH"   :high)]   (str b "\n"))
+         (when-let [b (sev-block "medium" :medium)] (str b "\n"))
+         (when-let [b (sev-block "low"    :low)]    (str b "\n"))
+         "    NOTE: address violations in the next control packet — "
+         "tighten constraints, rescope expected_files, or add anti-goals "
+         "so the executor doesn't repeat them.")))
+
 (defn summarise
   "Compact multi-line evidence string for the supervisor's prompt."
   [{:keys [iteration duration-ms files-written files-edited
-           exit-code verification slop-signals top-level dir-tree expected-check]}]
+           exit-code verification slop-signals top-level dir-tree
+           expected-check review]}]
   (let [secs     (int (/ (or duration-ms 0) 1000))
         ver-str  (if verification
                    (str "exit=" (:exit verification)
@@ -84,13 +104,12 @@
                     "helpers=" (:helpers-added? slop-signals) " "
                     "only-new=" (:only-new-files? slop-signals))
                (when expected-check
-                 ;; Targets the supervisor declared in the previous control
-                 ;; packet — what the LLM said this iteration would produce.
                  (str "  Declared targets (supervisor's own expected_files from prior packet):"
                       (when (seq (:present expected-check))
                         (str "\n    ✓ " (str/join "\n    ✓ " (:present expected-check))))
                       (when (seq (:missing expected-check))
                         (str "\n    ✗ " (str/join "\n    ✗ " (:missing expected-check))))))
+               (when review (format-review review))
                (when (seq dir-tree)
                  (str "  Directory tree :\n"
                       (str/join "\n" (map #(str "    " %)

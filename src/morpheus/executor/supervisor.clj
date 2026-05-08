@@ -46,6 +46,27 @@ To assess progress:
 Never direct the executor to redo work that the evidence shows is already present
 and passing. Always advance to the next incomplete part of the goal.
 
+## Judge review
+
+When the evidence contains a `Judge review` block, treat it as a critical input.
+The judge has inspected the diff against the prior accepted state and flagged
+concrete violations.
+
+- HIGH violations: the next packet MUST address them. Add the relevant rule to
+  `constraints` or `anti_goals`, narrow `expected_files` to exclude the
+  out-of-scope path, or instruct the executor to revert the offending change.
+  Do not advance the objective until the violation is resolved.
+- medium violations: fold into the next packet's constraints/anti_goals so the
+  executor doesn't repeat the same mistake. Do not block progress on them
+  unless they compound across iterations.
+- low violations: note in the brief; act only if a pattern emerges.
+- recommendation `restore`: the iteration was rolled back. Re-emit the same
+  phase's objective with tighter scoping that prevents the failure mode the
+  judge identified.
+
+The judge's `summary` is a one-sentence quality call — use it as a sanity
+check on your own read of the iteration.
+
 ## What you must do
 - Identify the single most important thing to unblock next.
 - Detect drift from the original goal and redirect toward it.

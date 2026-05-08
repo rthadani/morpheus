@@ -49,6 +49,8 @@
 
  :max-iterations  12
  :step-once?      true       ; pause after every iteration for human review
+ :judge-mode      :code
+ :review-threshold :high
 
  :fallback-model    "claude-haiku-4-5-20251001"
  :fallback-delay-ms 20000
