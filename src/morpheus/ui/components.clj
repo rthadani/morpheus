@@ -241,7 +241,8 @@
    Returns hiccup for the contents of #review-meta. When this is empty the
    parent #review-panel hides itself via CSS (:has selector)."
   [pause-event latest-ev]
-  (let [{:keys [iteration milestone? review review-pause?]} pause-event
+  (let [{:keys [iteration milestone? review review-pause?
+                exhausted? quota-message]} pause-event
         ver-ok? (or (nil? (:verification latest-ev))
                     (zero? (:exit (:verification latest-ev))))
         secs    (int (/ (or (:duration-ms latest-ev) 0) 1000))]
@@ -249,6 +250,7 @@
       [:div.review-header
        [:span.review-title
         (cond
+          exhausted?    (str "⛔ Tokens exhausted · iteration " iteration)
           review-pause? (str "⚠ Judge review · iteration " iteration)
           milestone?    (str "⭐ Milestone · iteration " iteration)
           :else         (str "⏸ Paused · iteration " iteration))]
@@ -263,6 +265,12 @@
             [:span.files-edit (str "~" (count (:files-edited latest-ev)) " edited")])
           [:span {:class (str "ver-inline " (if ver-ok? "ver-ok" "ver-fail"))}
            (if ver-ok? "✓ verified" "✗ verify failed")]])]
+      (when exhausted?
+        [:div.review-exhausted
+         [:div.review-exhausted-msg (or quota-message "Quota exhausted.")]
+         [:div.review-exhausted-hint
+          "Wait for tokens to reset, then click Continue to retry the same step."
+          " Restore / Retry / Ignore are not meaningful here. Abort to stop the run."]])
       (when review
         (judge-review-block review)))))
 

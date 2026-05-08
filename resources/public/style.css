@@ -326,6 +326,19 @@ body { background: var(--bg3); overflow: hidden; }
 .btn-restore, .btn-ignore { display: none; }
 #review-meta:has(.review-judge) ~ .review-form .btn-restore,
 #review-meta:has(.review-judge) ~ .review-form .btn-ignore { display: inline-block; }
+
+/* Exhaustion / quota notice */
+.review-exhausted {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 16px;
+  background: var(--red-bg, rgba(220, 38, 38, 0.12));
+  color: var(--red, #dc2626);
+  border-top: 1px solid rgba(220, 38, 38, 0.3);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.3);
+  font-size: 12px;
+}
+.review-exhausted-msg  { font-weight: 600; }
+.review-exhausted-hint { color: var(--text2, #9aa0a6); font-weight: 400; }
 .review-header {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 16px;

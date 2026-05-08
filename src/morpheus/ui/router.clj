@@ -196,7 +196,8 @@
     (let [run           (store/get-run run-store run-id)
           latest-ev     (when run (last @(:iterations run)))
           milestone?    (:milestone? event)
-          review-pause? (:review-pause? event)]
+          review-pause? (:review-pause? event)
+          exhausted?    (:exhausted? event)]
       ;; Swap only #review-meta — the form (and textarea) live in
       ;; #review-panel and are never re-rendered, so typing is not disrupted.
       (str (h/html
@@ -204,11 +205,17 @@
               (ui/review-meta event latest-ev)])
            (h/html
              [:div {:id "log-tail" :hx-swap-oob "beforeend"}
-              (ui/log-line (if review-pause? :warn (if milestone? :info :warn))
-                           (str (cond review-pause? "⚠ judge paused"
+              (ui/log-line (cond exhausted? :err
+                                 review-pause? :warn
+                                 milestone? :info
+                                 :else :warn)
+                           (str (cond exhausted?    "⛔ tokens exhausted"
+                                      review-pause? "⚠ judge paused"
                                       milestone?    "⭐ milestone"
                                       :else         "⏸ paused")
-                                " after iteration " (:iteration event)))])))
+                                " after iteration " (:iteration event)
+                                (when-let [m (:quota-message event)]
+                                  (str " — " m))))])))
 
     :output-line
     (str (h/html

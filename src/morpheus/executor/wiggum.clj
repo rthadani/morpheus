@@ -218,12 +218,39 @@
   (git-sh work-dir "clean" "-fdq"))
 
 (def ^:private rate-limit-signals
-  #{"rate_limit_error" "overloaded_error" "429" "too many requests" "rate limit"})
+  #{"rate_limit_error" "overloaded_error" "429" "too many requests"
+    "rate limit" "tokens will renew" "usage limit" "will reset at"
+    "claude usage limit reached" "you have reached your"})
 
-(defn- rate-limited? [{:keys [stdout stderr exit]}]
-  (and (pos? (or exit 0))
-       (let [out (str/lower-case (str stdout stderr))]
+(defn- rate-limited?
+  "Truthy if the result text contains a quota / rate-limit signal. Accepts
+   either a cc/run! result map ({:stdout :stderr :exit}) or a plain string."
+  [x]
+  (let [out (str/lower-case
+              (cond
+                (string? x) x
+                (map? x)    (str (:stdout x) (:stderr x) (:output x))
+                :else       (str x)))
+        ;; For maps, only count it as rate-limited if exit was non-zero —
+        ;; otherwise the run actually succeeded and the text is incidental.
+        non-zero? (or (string? x)
+                      (pos? (or (:exit x) (:exit-code x) 0)))]
+    (and non-zero?
          (boolean (some #(str/includes? out %) rate-limit-signals)))))
+
+(defn- exhaustion-message
+  "Extracts a short, user-facing message from the iteration output explaining
+   the quota state (e.g. 'Your tokens will renew at 4:00 PM'). Falls back to
+   a generic message when nothing matches."
+  [output]
+  (let [lines (str/split-lines (str output))
+        match (->> lines
+                   (filter #(let [l (str/lower-case %)]
+                              (some (fn [s] (str/includes? l s))
+                                    rate-limit-signals)))
+                   first)]
+    (or (some-> match str/trim not-empty)
+        "Claude reported a rate limit / quota error.")))
 
 (defn- run-with-fallback!
   "Retries a rate-limited CC run once with :fallback-model after :fallback-delay-ms.
@@ -415,8 +442,13 @@
           ev0              (evidence/build iteration cc-result verification top-level tree expected-check)
           review-disabled? (or (= :none (:review-threshold config))
                                (false? (:review? config)))   ; legacy alias
+          ;; Skip the judge for rate-limited iterations — the output is an
+          ;; error message, not real work, and the judge has nothing useful
+          ;; to say about it.
+          rl?              (rate-limited? cc-result)
           review           (when (and phase-ended?
-                                      (not review-disabled?))
+                                      (not review-disabled?)
+                                      (not rl?))
                              (judge/review!
                                (or (:supervisor-model-config config)
                                    (:model-config config {}))
@@ -431,7 +463,15 @@
                                 :files-deleted  (:files-deleted ev0)
                                 :success-check  (:success-check control-packet)
                                 :diff           (git-diff work-dir)}))
-          ev               (assoc ev0 :review review :phase-ended? phase-ended?)]
+          ev               (assoc ev0
+                                   :review review
+                                   :phase-ended? phase-ended?
+                                   :exhausted? rl?
+                                   :quota-message (when rl?
+                                                    (exhaustion-message
+                                                      (str (:stdout cc-result)
+                                                           "\n"
+                                                           (:stderr cc-result)))))]
       (emit! run {:type      :iteration-complete
                   :iteration iteration
                   :evidence  ev})
@@ -494,6 +534,7 @@
 
 (defn- iteration-context [run run-config ev iteration]
   (let [verified?        (verification-passed? (:verification ev))
+        exhausted?       (boolean (:exhausted? ev))
         checkpoint-every (:checkpoint-every run-config)
         milestone-hit?   (and checkpoint-every
                               (zero? (mod iteration checkpoint-every)))
@@ -502,12 +543,17 @@
         review-threshold (or (:review-threshold run-config) :high)
         review-pause?    (and phase-ended?
                               (judge/requires-pause? review review-threshold))]
-    {:verified?     verified?
-     :phase-ended?  phase-ended?
-     :milestone?    milestone-hit?
-     :review        review
-     :review-pause? review-pause?
-     :pause?        (or (:step-once? @(:control run)) milestone-hit? review-pause?)}))
+    {:verified?      verified?
+     :exhausted?     exhausted?
+     :quota-message  (:quota-message ev)
+     :phase-ended?   phase-ended?
+     :milestone?     milestone-hit?
+     :review         review
+     :review-pause?  review-pause?
+     :pause?         (or exhausted?
+                         (:step-once? @(:control run))
+                         milestone-hit?
+                         review-pause?)}))
 
 (defn- merge-steer+feedback [feedback steer]
   (cond (and feedback steer) (str feedback "\n\n" steer)
@@ -566,13 +612,23 @@
                                             initial-state action)])))
 
     (let [feedback (when (seq (:feedback action)) (:feedback action))]
-      ;; If the human supplied feedback, they expect another iteration to act
-      ;; on it — do not auto-terminate on verified, and bump the iteration
-      ;; cap if the next iteration would exceed it.
-      (if (and (:verified? ctx) (not feedback))
+      (cond
+        ;; Token / quota exhaustion — retry the same packet on resume. No
+        ;; point asking the supervisor to plan from an error message; bump
+        ;; the iteration cap so the failed attempt doesn't consume a slot.
+        (:exhausted? ctx)
+        (do (swap! (:max-iters run) max (inc iteration))
+            [:recur (inc iteration) control-packet])
+
+        ;; If the human supplied feedback, they expect another iteration to
+        ;; act on it — do not auto-terminate on verified, and bump the
+        ;; iteration cap if the next iteration would exceed it.
+        (and (:verified? ctx) (not feedback))
         (do (commit-phase!)
             (finish-run! run run-config work-dir :verified iteration)
             [:done])
+
+        :else
         (do (commit-phase!)
             (when feedback
               (swap! (:max-iters run) max (inc iteration)))
@@ -587,7 +643,8 @@
   (set-state! run :paused)
   (emit! run (merge {:type :run-paused :iteration iteration}
                     (select-keys ctx [:verified? :milestone? :phase-ended?
-                                      :review :review-pause?]))))
+                                      :review :review-pause?
+                                      :exhausted? :quota-message]))))
 
 (defn execute!
   "Starts the Wiggum loop in a go-block. Returns the run map immediately.
