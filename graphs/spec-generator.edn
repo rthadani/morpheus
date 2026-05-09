@@ -86,8 +86,16 @@
      when the user explicitly wants the run to grind through without
      stopping for quality review.
 
-  6. Proposed phases and order
-  7. Proposed :success-check command
+  6. Proposed phases and order.  Each phase header must open with a
+     `Deliverables:` line listing the concrete files (or, for a phase that
+     fleshes out an existing file, the routes/functions added).  The
+     downstream supervisor lifts these directly into per-iteration
+     `expected_files` — vague phase headers degrade to vague narrowing.
+  7. Proposed :success-check command — single shell chain, file existence
+     plus the project's native test runner.  No live smoke-tests, no
+     setsid, no fuser, no docker build (see :success-check section in
+     Phase 3).  Pick the test invocation idiomatic to the chosen stack;
+     do not prescribe one — you already know how the language tests.
   8. Ambiguities and how you resolved them
 
   === Phase 2: Choose models ===
@@ -187,8 +195,53 @@
 
     :objective          — what to build, phase by phase.
                           Use === Phase N: name === headings.
+
+                          Each phase header MUST be followed by a
+                          `Deliverables:` block listing concrete files
+                          (one per line) or, for phases that flesh out
+                          an existing file, the specific routes/functions
+                          added.  The supervisor lifts this list straight
+                          into per-iteration `expected_files`, so vague
+                          headers (no Deliverables: block, or prose-only
+                          deliverables like 'a working server') produce
+                          vague narrowing and lots of wasted iterations.
+
                           Be specific: file names, API routes, data shapes,
                           test expectations.
+
+                          Context-window budget — HARD CAPS:
+                            Whole :objective body must stay under 12000
+                              characters (roughly 3000 tokens).  The
+                              executor's iteration-1 CLAUDE.md embeds the
+                              FULL :objective verbatim, and the supervisor
+                              re-reads the original objective on every
+                              iteration to plan narrowing.  An overlong
+                              objective hijacks the context budget the
+                              executor needs for the actual file bodies it
+                              writes, and bloats the supervisor's prompt
+                              every turn.
+                            Per-phase body must stay under ~2000 chars.
+                              If a phase needs more detail than that fits,
+                              you have two options:
+                                (a) describe the structure in the phase
+                                    body (file list, function signatures,
+                                    schema names) and let the executor
+                                    fill in the bodies — Claude knows the
+                                    idioms of every common stack, so do
+                                    not re-teach them.
+                                (b) lift the detail into a Phase-1
+                                    deliverable file (`docs/phase-N.md`,
+                                    `mockup.html`, `schema.sql`) that
+                                    later phases reference.  Visual
+                                    phases (mockup.html / mockup.txt /
+                                    expected-session.txt) are the
+                                    canonical example.
+                            Never inline a verbatim file body longer than
+                              ~50 lines.  Lift it to a Phase-1 deliverable
+                              and reference it.  This is the most common
+                              cause of bloat in generated specs.
+                            Phase 4 validation rejects any spec whose
+                              :objective exceeds the cap.
 
                           UI handling — pick the visual artifact based on
                           the kind of UI:
@@ -218,15 +271,24 @@
 
                           End with a Documentation phase covering README.md.
 
-                          IMPORTANT — embedded code/JSON inside this
-                          string: when you need to show a Clojure map,
-                          a JSON example, or a Maven coordinate inside
-                          the :objective string, use single-quoted
-                          'literals' or backtick `code` style, NOT
-                          escaped \\\"double quotes\\\". Embedded
-                          unescaped double-quotes terminate the outer
-                          EDN string and make the file unparseable. The
-                          options-trader.edn :tui block is the model.
+                          IMPORTANT — EDN string foot-guns inside this
+                          string body:
+                            * Embedded `\"` terminates the outer string.
+                              For Clojure maps, JSON examples, Maven
+                              coordinates: use single-quoted 'literals'
+                              or backtick `code` style instead.
+                              The options-trader.edn :tui block is the
+                              model.
+                            * Bare `\\` followed by a newline is NOT a
+                              valid EDN escape — the strict reader fails
+                              with `Unsupported escape character: \\`.
+                              When showing a multi-line shell command
+                              with line continuations, write `\\\\` (two
+                              backslashes in the EDN source) so the parsed
+                              string contains a single literal `\\`.
+                            * Validate with `clojure.edn/read-string`
+                              (strict) — `clojure.core/read-string` is
+                              lenient and silently accepts both bugs.
 
     :project-dir        — nil
 
@@ -244,15 +306,47 @@
                           whole build at the end; :acceptance-criteria
                           gates one phase at a time.
 
-    :success-check      — shell one-liner that exits 0 only when the build
-                          is genuinely working end-to-end.
+    :success-check      — shell one-liner that exits 0 only when the
+                          per-iteration deliverables are present AND the
+                          project's tests pass.  Run by morpheus via
+                          `sh -c <whole-string>`.
                           Hard rules:
-                            Never bare & — always setsid ... &
-                            Never kill $SERVER_PID — always fuser -k <port>/tcp
-                            docker build runs once at end, not every iteration
+                            Single command chain only — every line ends
+                              with ` \\` continuation or ` && ` connector.
+                              Trailing prose / Note: blocks / blank lines
+                              followed by comment paragraphs are FORBIDDEN —
+                              `sh -c` parses them as separate commands and
+                              the exit code becomes the last prose line
+                              (typically 127), so verification can never
+                              report success.
+                            Tests are MANDATORY, not optional — the chain
+                              must invoke the project's native test runner
+                              at the end of the chain (after file-existence
+                              checks).  Pick the idiomatic command for the
+                              chosen stack; this generator does not
+                              prescribe a language.  File-existence checks
+                              alone are NOT sufficient: the executor can
+                              create a file with broken syntax that still
+                              passes `test -f`, so without a test
+                              invocation the verification is a smoke alarm
+                              with the battery removed.
+                            Per-iteration scope only — file existence
+                              + tests.  Do NOT include `setsid`, `fuser`,
+                              `nohup`, `kill $SERVER_PID`, port probes,
+                              `curl` to localhost, `docker build`, or any
+                              command that starts a long-lived process.
+                              These are fragile across runs (port busy,
+                              race with `sleep`, subprocess scoping under
+                              `sh -c`) AND `setsid` / `fuser` do not exist
+                              on macOS.
+                            Live server smoke-test, `docker build`, and
+                              `docker run` belong in a manual Phase-N step
+                              documented in the README — never in
+                              :success-check.
                             Tests must not call real external services
-                          If a visual phase is present, include the
-                          appropriate `test -f output/<artifact>` check.
+                              (network, real cloud APIs, prod databases).
+                          If a visual phase is present, include
+                          `test -f output/<artifact>` in the chain.
 
     :constraints        — vector of strings.  Always include:
                             'Work phase by phase — do not start phase N+1
@@ -356,7 +450,32 @@
                                   ; not the substring 'color' in prose like
                                   ; 'colour palette' or 'colors:'.
        ! grep -q '<<<' output/<slug>.edn   ; placeholder text not stripped
-  6. Print summary line:
+       ! grep -qE 'setsid|fuser ' output/<slug>.edn
+                                  ; Linux-only, fails on Darwin
+       ! awk '/^ :success-check/,/^[^ ]/' output/<slug>.edn | grep -qE '^[[:space:]]*(Note:|#|;)'
+                                  ; trailing prose / Note: / comment lines
+                                  ; inside :success-check break sh -c
+       ! awk '/^ :success-check/,/^[^ ]/' output/<slug>.edn | grep -qE 'setsid|fuser|nohup|docker (build|run)'
+                                  ; live smoke-test commands forbidden in
+                                  ; per-iteration :success-check
+  6. Context-window budget check — must pass:
+       OBJ_LEN=$(clojure -e '(count (:objective (clojure.edn/read-string (slurp \"output/<slug>.edn\"))))')
+       test $OBJ_LEN -le 12000   ; under 12K chars total
+     If this fails, the spec must be rewritten to lift detail into
+     deliverable files; do not just trim prose to squeeze under the cap
+     while leaving the structure unchanged.
+
+  7. Tests-are-required check — :success-check must include a test
+     invocation, not just file existence:
+       awk '/^ :success-check/,/^[^ ]/' output/<slug>.edn \\
+         | grep -qvE '^[[:space:]]*\"[[:space:]]*$' \\
+         | grep -qE '(test|spec|check)[ -]|pytest|jest|vitest|mocha|cargo test|go test|rspec'
+     If the project's test idiom is unusual, ensure the chain at minimum
+     ends with a non-`test -f` command that exits 0 only when code is
+     actually exercised.  A spec whose :success-check is purely
+     `test -f` checks must be rejected.
+
+  8. Print summary line:
        Spec written: output/<slug>.edn
        Provider: <provider>  Complexity: <complexity>
        Judge mode: <code|research>  Review threshold: <high|medium|low>
@@ -374,34 +493,59 @@
    'Build a full-stack Kanban board application.
 
     === Phase 1: Skeleton ===
+    Deliverables:
+      package.json
+      vite.config.ts
+      server/index.ts
+      db/schema.sql
+      src/App.tsx (placeholder)
     - Vite + React + TypeScript project scaffold
     - Express + TypeScript server on port 3001
     - SQLite via better-sqlite3 at db/kanban.db
     - Single passing test in each of Vitest and Jest
 
     === Phase 2: Visual reference ===
-    Produce output/mockup.html — a static HTML file showing the full Kanban UI:
-    board with three columns (To Do, In Progress, Done), cards in each column,
-    add-card and add-list controls, drag handle indicators, colour palette,
-    and typography. No application logic — appearance only.
-    All subsequent UI phases must match this file.
+    Deliverables: output/mockup.html
+    A static HTML file showing the full Kanban UI: board with three columns
+    (To Do, In Progress, Done), cards in each column, add-card and add-list
+    controls, drag handle indicators, colour palette, and typography.
+    No application logic — appearance only.  All subsequent UI phases must
+    match this file.
 
     === Phase 3: React frontend ===
+    Deliverables:
+      src/App.tsx
+      src/hooks/useKanban.ts
+      src/components/Board.tsx
+      src/components/List.tsx
+      src/components/Card.tsx
+      src/__tests__/kanban.test.tsx
     Implement the UI from mockup.html.
     - Named lists side-by-side; add, rename, delete lists and cards
     - Drag-and-drop via HTML5 DnD API — no library
     - Vitest + React Testing Library covering all CRUD operations
 
     === Phase 4: Backend + API ===
+    Deliverables:
+      server/routes/lists.ts
+      server/routes/cards.ts
+      server/__tests__/api.test.ts
     - REST: GET /api/health, GET /api/boards/:id,
       POST/PATCH/DELETE /api/lists, POST/PATCH/DELETE /api/cards
     - Jest + supertest for all endpoints
 
     === Phase 5: Docker deploy ===
+    Deliverables:
+      Dockerfile
+      docker-compose.yml
+      .dockerignore
     - Multi-stage Dockerfile; docker-compose.yml port 3001:3001
 
     === Phase 6: Documentation ===
-    - README.md: summary, install, usage'
+    Deliverables:
+      README.md
+      CLAUDE.md
+    - Summary, install, usage, manual smoke-test commands'
 
    :project-dir nil
 
@@ -436,17 +580,28 @@
 
     --- Phase 5 (Docker deploy) ---
     Command:
-      podman-compose up --build -d && sleep 8 && curl -sf http://localhost:3001/api/health && podman-compose down
+      test -f Dockerfile && test -f docker-compose.yml && test -f .dockerignore
     Required:
-      * Container starts, health endpoint responds, container stops cleanly.'
+      * All three artifacts present.
+      * The Dockerfile is multi-stage (builder + runtime).
+      * Live smoke-test (`podman-compose up --build -d && sleep 8 &&
+        curl -sf http://localhost:3001/api/health && podman-compose down`)
+        is documented in README.md as a manual verification step,
+        intentionally NOT in :success-check.'
 
    :success-check
-   'npm test && npm run build &&
-    test -f output/mockup.html &&
-    podman-compose up --build -d && sleep 8 &&
-    curl -sf http://localhost:3001/api/health &&
-    podman-compose down &&
-    test -f README.md'
+   'test -f package.json \\
+    && test -f output/mockup.html \\
+    && test -f src/App.tsx \\
+    && test -f src/hooks/useKanban.ts \\
+    && test -f server/routes/lists.ts \\
+    && test -f server/routes/cards.ts \\
+    && test -f Dockerfile \\
+    && test -f docker-compose.yml \\
+    && test -f README.md \\
+    && test -f CLAUDE.md \\
+    && npm test \\
+    && npm run build'
 
    :constraints
    ['Work phase by phase — do not start phase N+1 until phase N tests pass'
@@ -513,7 +668,14 @@
   "COMPLEX outputs must reach the depth of graphs/options-trader/options-trader.edn — every namespace, every column, every test fixture enumerated; thin sketches are a defect"
   "COMPLEX outputs must include :checkpoint-every (max-iterations / 5, ceil)"
   "The output file must parse as valid EDN via clojure.edn/read-string (strict) before declaring done"
-  "Create the output/ directory if it does not exist"]
+  "Create the output/ directory if it does not exist"
+  "Every phase header in the output spec must open with a `Deliverables:` block listing concrete file paths (or routes/functions for phases that flesh out an existing file) — the supervisor lifts this list straight into per-iteration expected_files"
+  "The output spec's :success-check must be a single `&&`/`\\` continuation chain with no trailing prose, Note: blocks, or blank-line-separated comments — `sh -c` parses any non-continuation line as a separate command and the exit code becomes the last line (typically 127), so a poisoned check can never report success"
+  "The output spec's :success-check is per-iteration: file existence (`test -f path`) plus an invocation of the project's native test runner — pick the idiomatic command for the chosen stack rather than prescribing one.  Never include `setsid`, `fuser`, `nohup`, port probes, `curl` to localhost, `docker build`, or `docker run` (Darwin lacks setsid/fuser, and live smoke-tests are too flaky for the per-iteration cycle)"
+  "The output spec's :success-check MUST end with the project's test invocation, not just `test -f` checks.  Without a test command the executor can write syntactically broken code that still creates files and 'passes' verification, which is the failure mode the per-iteration check exists to prevent"
+  "Cap the output spec's :objective at ~12000 characters total / ~2000 per phase.  The full :objective is embedded into iteration-1 CLAUDE.md verbatim and re-read by the supervisor every turn — overlong objectives starve the executor's context for the actual code it has to write.  Lift detail into deliverable files (mockup.html, schema.sql, docs/phase-N.md) rather than inlining"
+  "Live server smoke-tests, `docker build`, and `docker run` belong in a Phase-N acceptance criterion AND a documented manual verification block in README.md — not in :success-check"
+  "Inside the output spec's :objective string, escape multi-line shell continuations as `\\\\` (parsed to a literal `\\`); a bare `\\` followed by a newline is not a valid EDN escape and `clojure.edn/read-string` will reject the file"]
 
  :anti-goals
  ["Do not invent model IDs not listed in the Phase 2 table"
@@ -526,7 +688,13 @@
   "Do not produce a thin SIMPLE-shaped spec when the description is COMPLEX (multi-service, persistent storage, agent integration, etc.); under-detailing is the most common failure mode"
   "Do not emit :temperature or :max-tokens keys"
   "Do not omit :judge-mode or :review-threshold from the output spec — defaulting silently to :code is wrong for research-style deliverables and the user has no way to discover the mismatch from the generated file alone"
-  "Do not pick :judge-mode :spec for the output — that mode is for reviewing specs themselves, not for downstream runs of those specs"]
+  "Do not pick :judge-mode :spec for the output — that mode is for reviewing specs themselves, not for downstream runs of those specs"
+  "Do not emit `setsid` or `fuser` anywhere in the output spec — both are Linux-only and the user runs morpheus on macOS where these commands fail with exit 127"
+  "Do not append a `Note:` block, explanatory paragraph, or any non-`&&`/non-`\\` line to :success-check — this was a real defect that left a generated spec's verification permanently broken"
+  "Do not embed verbatim file bodies of more than ~50 lines in :objective — emit them as separate Phase-1 deliverable files instead; large embedded bodies bloat iteration-1 CLAUDE.md and the supervisor's per-iteration prompt"
+  "Do not produce an :objective longer than 12000 characters — it is the single biggest driver of context bloat across the whole downstream run"
+  "Do not produce a :success-check whose only commands are `test -f` checks — it must invoke the project's tests so syntactically broken code is caught"
+  "Do not prescribe a specific test runner in the schema/rules sections of generator output — pick the idiom of the chosen stack (the executor knows them all) and only mention concrete commands inside the generated spec itself"]
 
  :max-iterations      6
  :step-once?          false
