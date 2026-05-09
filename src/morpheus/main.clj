@@ -33,6 +33,8 @@
                                          (parse-long (second remaining))))
         "--view"           (recur (rest remaining)
                                   (assoc acc :view-only? true))
+        "--fresh"          (recur (rest remaining)
+                                  (assoc acc :fresh? true))
         (recur (rest remaining) (assoc acc :edn-file (first remaining)))))))
 
 (defn- detect-type [cfg]
@@ -177,12 +179,12 @@
       "clj -M:run")))
 
 (defn -main [& args]
-  (let [{:keys [edn-file project-dir step-once? max-iterations view-only?]
+  (let [{:keys [edn-file project-dir step-once? max-iterations view-only? fresh?]
          :as   opts} (parse-args args)]
 
     (when-not (or edn-file (and view-only? project-dir))
       (let [cmd (invocation)]
-        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>]"))
+        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>] [--fresh]"))
         (println (str "       " cmd " --view --project-dir <path>"))
         (println)
         (println "Examples:")
@@ -209,6 +211,14 @@
           rtype (detect-type raw)]
 
       (println (str "Loading " edn-file " [" (name rtype) "]"))
+
+      (when (and fresh? project-dir)
+        (let [home (System/getProperty "user.home")
+              slug (-> project-dir java.io.File. .getCanonicalFile .getName)
+              wd   (str home "/.morpheus/runs/" slug)]
+          (when (.exists (java.io.File. wd))
+            (println (str "Removing cached work-dir: " wd))
+            (shell/sh "rm" "-rf" wd))))
 
       (sys/start!)
       (let [run-store (get-in @sys/system [:run-store])

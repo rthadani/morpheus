@@ -330,11 +330,26 @@
 (defn- consume-steer! [run]
   (first (swap-vals! (:steer-buffer run) (constantly nil))))
 
-(defn- snapshot-path [run-config work-dir]
-  (if-let [pd (:project-dir run-config)]
-    (str pd "/morpheus-run-snapshot.edn")
-    (when work-dir
-      (str work-dir "/morpheus-run-snapshot.edn"))))
+(defn- stable-work-dir
+  "Stable cache path under ~/.morpheus/runs/{slug}/ derived from project-dir.
+   Returns nil when no project-dir is set (ephemeral tempdir is used in that case)."
+  [run-config]
+  (when-let [pd (:project-dir run-config)]
+    (let [home (System/getProperty "user.home")
+          slug (-> pd io/file .getCanonicalFile .getName)]
+      (str home "/.morpheus/runs/" slug))))
+
+(defn- work-dir-empty? [path]
+  (let [f (io/file path)]
+    (or (not (.exists f))
+        (zero? (count (.listFiles f))))))
+
+(defn- snapshot-path
+  "Snapshot file lives inside the work-dir so it is co-located with the state
+   it describes and never pollutes the user's project-dir."
+  [_run-config work-dir]
+  (when work-dir
+    (str work-dir "/morpheus-run-snapshot.edn")))
 
 (defn- write-snapshot! [run]
   (try
@@ -359,16 +374,19 @@
   (edn/read-string (slurp path)))
 
 (defn- load-snapshot
-  "Snapshot map if one exists for run-config and its work-dir is still on disk."
+  "Snapshot map if one exists at the stable work-dir for this run-config.
+   Looks under ~/.morpheus/runs/{slug}/morpheus-run-snapshot.edn. Returns nil
+   if the snapshot is missing, malformed, or its work-dir is gone."
   [run-config]
   (try
-    (let [path (snapshot-path run-config nil)]
-      (when (and path (.exists (io/file path)))
-        (let [snap (read-snapshot path)]
-          (if (.exists (io/file (:work-dir snap "")))
-            snap
-            (do (log/warn "Snapshot found but work-dir is gone — starting fresh" {:path path})
-                nil)))))
+    (when-let [wd (stable-work-dir run-config)]
+      (let [path (snapshot-path run-config wd)]
+        (when (and path (.exists (io/file path)))
+          (let [snap (read-snapshot path)]
+            (if (.exists (io/file (:work-dir snap "")))
+              snap
+              (do (log/warn "Snapshot found but work-dir is gone — starting fresh" {:path path})
+                  nil))))))
     (catch Exception e
       (log/warn "Failed to read snapshot — starting fresh" {:message (ex-message e)})
       nil)))
@@ -503,10 +521,21 @@
                                   {:work-dir       (:work-dir snapshot)
                                    :from-iteration (inc (count (:iterations snapshot)))})
                         (:work-dir snapshot))
-                    (let [wd (cc/make-work-dir! run-id "wiggum")]
-                      (when-let [pd (:project-dir run-config)]
-                        (log/info "Copying project into work dir" {:src pd :dst wd})
-                        (shell/sh "sh" "-c" (str "cp -r " pd "/* " wd "/") :dir wd))
+                    (let [wd (or (when-let [s (stable-work-dir run-config)]
+                                   (.mkdirs (io/file s))
+                                   s)
+                                 (cc/make-work-dir! run-id "wiggum"))]
+                      ;; only seed from project-dir if the work-dir is empty —
+                      ;; a populated stable work-dir means a previous run was
+                      ;; aborted and the user wants to keep going from where it left
+                      (when (and (:project-dir run-config)
+                                 (work-dir-empty? wd))
+                        (let [pd (:project-dir run-config)]
+                          (when (.exists (io/file pd))
+                            (log/info "Seeding work-dir from project-dir" {:src pd :dst wd})
+                            (shell/sh "sh" "-c" (str "cp -r " pd "/. " wd "/") :dir wd))))
+                      (when-not (work-dir-empty? wd)
+                        (log/info "Reusing populated work-dir" {:dir wd}))
                       wd))
         _             (reset! (:work-dir run) work-dir)
         _             (ensure-git-repo! work-dir)

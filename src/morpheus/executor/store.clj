@@ -53,14 +53,22 @@
     :wiggum (wiggum-summary run)
     :dag    (dag-summary run)))
 
+(defn- cache-path
+  "~/.morpheus/runs/{slug}/morpheus-ui-state.edn — slug is the basename of
+   the canonical project-dir path. Returns nil if project-dir is unset."
+  [project-dir]
+  (when project-dir
+    (let [home (System/getProperty "user.home")
+          slug (-> project-dir io/file .getCanonicalFile .getName)]
+      (str home "/.morpheus/runs/" slug "/morpheus-ui-state.edn"))))
+
 (defn persist-run!
-  "Saves a Wiggum run summary to project-dir/morpheus-ui-state.edn.
+  "Saves a Wiggum run summary to ~/.morpheus/runs/{slug}/morpheus-ui-state.edn.
    No-op when :project-dir is absent."
   [run]
   (try
-    (when-let [pd (get-in run [:config :project-dir])]
-      (let [summary (run-summary run)
-            path    (str pd "/morpheus-ui-state.edn")]
+    (when-let [path (some-> (get-in run [:config :project-dir]) cache-path)]
+      (let [summary (run-summary run)]
         (io/make-parents (io/file path))
         (spit path (pr-str summary))
         (log/info "UI state persisted" {:path path})))
@@ -89,18 +97,19 @@
      :event-log      (atom [])}))
 
 (defn load-ui-state!
-  "Loads project-dir/morpheus-ui-state.edn into the store so a previous run
-   stays visible after restart."
+  "Loads ~/.morpheus/runs/{slug}/morpheus-ui-state.edn into the store so a
+   previous run stays visible after restart. project-dir is used only to
+   derive the slug; the file itself lives in the cache."
   [store project-dir]
   (try
-    (let [path (str project-dir "/morpheus-ui-state.edn")
-          f    (io/file path)]
-      (when (.exists f)
-        (let [summary (edn/read-string (slurp f))
-              run     (frozen-wiggum-run summary)]
-          (swap! store assoc (:run-id run) run)
-          (log/info "Loaded persisted UI state" {:run-id (:run-id run) :path path})
-          run)))
+    (when-let [path (cache-path project-dir)]
+      (let [f (io/file path)]
+        (when (.exists f)
+          (let [summary (edn/read-string (slurp f))
+                run     (frozen-wiggum-run summary)]
+            (swap! store assoc (:run-id run) run)
+            (log/info "Loaded persisted UI state" {:run-id (:run-id run) :path path})
+            run))))
     (catch Exception e
       (log/warn "Failed to load UI state" {:project-dir project-dir :message (ex-message e)}))))
 
