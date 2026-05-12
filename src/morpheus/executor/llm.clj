@@ -13,6 +13,45 @@
 
 (def default-model "claude-haiku-4-5-20251001")
 
+(def rate-limit-signals
+  "Substrings appearing in claude CLI stdout/stderr when API quota or rate
+   limits block the call. Wiggum reads this set too — single source of truth."
+  #{"rate_limit_error" "overloaded_error" "429" "too many requests"
+    "rate limit" "tokens will renew" "usage limit" "will reset at"
+    "claude usage limit reached" "you have reached your"})
+
+(defn rate-limited?
+  "True when the given text contains any rate-limit signal."
+  [text]
+  (let [out (str/lower-case (str text))]
+    (boolean (some #(str/includes? out %) rate-limit-signals))))
+
+(defn exhaustion-message
+  "First line in the text that mentions a rate-limit signal, trimmed.
+   Falls back to a generic message when nothing matches."
+  [text]
+  (let [lines (str/split-lines (str text))
+        match (->> lines
+                   (filter #(let [l (str/lower-case %)]
+                              (some (fn [s] (str/includes? l s)) rate-limit-signals)))
+                   first)]
+    (or (some-> match str/trim not-empty)
+        "Claude reported a rate limit / quota error.")))
+
+(defn- throw-cli-error!
+  "Surfaces a typed :cause :exhausted exception when the CLI's output looks
+   like a rate-limit / quota error, so callers can pause-and-retry instead
+   of crashing. Falls back to the legacy generic error otherwise."
+  [tag {:keys [exit out err]}]
+  (let [combined (str out "\n" err)]
+    (if (rate-limited? combined)
+      (throw (ex-info (str tag " (rate limited)")
+                      {:cause   :exhausted
+                       :message (exhaustion-message combined)
+                       :exit    exit
+                       :stderr  err}))
+      (throw (ex-info tag {:exit exit :stderr err})))))
+
 (defn- complete-ollama [{:keys [model-id system]} prompt]
   (when (str/blank? model-id)
     (throw (ex-info "model-id required for :ollama provider" {:provider :ollama})))
@@ -23,8 +62,7 @@
                      "--" "--print" "--dangerously-skip-permissions"]
         result      (apply shell/sh (concat args [:in full-prompt]))]
     (when (pos? (:exit result))
-      (throw (ex-info "ollama launch claude error"
-                      {:exit (:exit result) :stderr (:err result)})))
+      (throw-cli-error! "ollama launch claude error" result))
     (str/trim (:out result))))
 
 (defn- complete-kimi
@@ -52,8 +90,7 @@
                       model-id (concat ["--model" model-id]))
         result      (apply shell/sh (concat args [:in full-prompt :env env]))]
     (when (pos? (:exit result))
-      (throw (ex-info "claude CLI error (kimi)"
-                      {:exit (:exit result) :stderr (:err result)})))
+      (throw-cli-error! "claude CLI error (kimi)" result))
     (str/trim (:out result))))
 
 (defn- complete-claude
@@ -67,7 +104,7 @@
                       model-id (concat ["--model" model-id]))
         result      (apply shell/sh (concat args [:in full-prompt]))]
     (when (pos? (:exit result))
-      (throw (ex-info "claude CLI error" {:exit (:exit result) :stderr (:err result)})))
+      (throw-cli-error! "claude CLI error" result))
     (str/trim (:out result))))
 
 (defn complete

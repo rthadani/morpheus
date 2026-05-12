@@ -16,7 +16,13 @@
      :executor-model-config   optional  — overrides for executor only
      :supervisor-model-config optional  — overrides for supervisor only
      :generate-claude-md?     optional  — write a project CLAUDE.md after success
-                                          (default true; pass false to skip)"
+                                          (default true; pass false to skip)
+     :polish-pass?            optional  — when true, run one extra CC pass after
+                                          verification to back-fill brief WHY
+                                          comments on non-obvious code. Best-
+                                          effort; quota / errors are logged and
+                                          the run finalises regardless.
+                                          (default false)"
   (:require
    [clojure.core.async          :as async :refer [go chan put! <!]]
    [clojure.edn                 :as edn]
@@ -67,13 +73,18 @@
      :resume-ch      (chan 1)
      :started-at     (System/currentTimeMillis)}))
 
-(defn- emit!
+(defn emit!
+  "Append-and-publish: stamps the event with :ts, conjs onto :event-log, and
+   puts it on :event-ch. Public so retry-on-exhaustion can expand to call it."
   [{:keys [event-ch event-log]} event]
   (let [stamped (assoc event :ts (System/currentTimeMillis))]
     (swap! event-log conj stamped)
     (put! event-ch stamped)))
 
-(defn- set-state! [run new-state]
+(defn set-state!
+  "Resets the run's state atom and emits a :state-change event. Public so
+   retry-on-exhaustion can expand to call it."
+  [run new-state]
   (reset! (:state run) new-state)
   (emit! run {:type :state-change :state new-state}))
 
@@ -217,40 +228,20 @@
   (git-sh work-dir "reset" "--hard" "-q" "HEAD")
   (git-sh work-dir "clean" "-fdq"))
 
-(def ^:private rate-limit-signals
-  #{"rate_limit_error" "overloaded_error" "429" "too many requests"
-    "rate limit" "tokens will renew" "usage limit" "will reset at"
-    "claude usage limit reached" "you have reached your"})
-
 (defn- rate-limited?
   "Truthy if the result text contains a quota / rate-limit signal. Accepts
-   either a cc/run! result map ({:stdout :stderr :exit}) or a plain string."
+   either a cc/run! result map ({:stdout :stderr :exit}) or a plain string.
+   Signals are sourced from morpheus.executor.llm to keep one source of truth."
   [x]
-  (let [out (str/lower-case
-              (cond
-                (string? x) x
-                (map? x)    (str (:stdout x) (:stderr x) (:output x))
-                :else       (str x)))
+  (let [text (cond
+               (string? x) x
+               (map? x)    (str (:stdout x) (:stderr x) (:output x))
+               :else       (str x))
         ;; For maps, only count it as rate-limited if exit was non-zero —
         ;; otherwise the run actually succeeded and the text is incidental.
         non-zero? (or (string? x)
                       (pos? (or (:exit x) (:exit-code x) 0)))]
-    (and non-zero?
-         (boolean (some #(str/includes? out %) rate-limit-signals)))))
-
-(defn- exhaustion-message
-  "Extracts a short, user-facing message from the iteration output explaining
-   the quota state (e.g. 'Your tokens will renew at 4:00 PM'). Falls back to
-   a generic message when nothing matches."
-  [output]
-  (let [lines (str/split-lines (str output))
-        match (->> lines
-                   (filter #(let [l (str/lower-case %)]
-                              (some (fn [s] (str/includes? l s))
-                                    rate-limit-signals)))
-                   first)]
-    (or (some-> match str/trim not-empty)
-        "Claude reported a rate limit / quota error.")))
+    (and non-zero? (llm/rate-limited? text))))
 
 (defn- run-with-fallback!
   "Retries a rate-limited CC run once with :fallback-model after :fallback-delay-ms.
@@ -281,10 +272,14 @@
     text))
 
 (defn- control-packet->claude-md
-  ([packet] (control-packet->claude-md packet nil nil))
-  ([packet work-dir-contents] (control-packet->claude-md packet work-dir-contents nil))
+  ([packet] (control-packet->claude-md packet nil nil :code))
+  ([packet work-dir-contents] (control-packet->claude-md packet work-dir-contents nil :code))
   ([packet work-dir-contents path-prefix-to-strip]
-   (let [constraints (:constraints packet)
+   (control-packet->claude-md packet work-dir-contents path-prefix-to-strip :code))
+  ([packet work-dir-contents path-prefix-to-strip mode]
+   (let [mode        (or mode :code)
+         research?   (= mode :research)
+         constraints (:constraints packet)
          anti-goals  (:anti-goals  packet)
          plan        (when (seq (:plan packet))
                        (map #(strip-path-prefix % path-prefix-to-strip) (:plan packet)))]
@@ -302,6 +297,29 @@
                  "> Example: `npm create vite@latest . -- --template react-ts` (NOT `npm create vite@latest my-app`)\n\n")
             (str "> All source files must be created DIRECTLY in this directory. Do not create a subdirectory matching the project name.\n"
                  "> When scaffolding with npm/vite/etc, ALWAYS pass `.` as the project name: e.g. `npm create vite@latest . -- --template react-ts`\n\n"))
+          (if research?
+            (str "> **Output style — research deliverable.** This iteration produces written analysis, not source code. Substance matters more than brevity, but fluff still wastes tokens.\n"
+                 "> - Cite every load-bearing claim. Inline URLs for web sources; file paths plus line/section ranges for local sources; ticker + filing type + date for SEC documents. A claim with no source is one the next iteration cannot verify.\n"
+                 "> - Distinguish observed facts from inferences. Phrase inferences as inferences (\"this suggests…\", \"likely because…\"), not as facts.\n"
+                 "> - Include counter-evidence and alternatives considered. A one-sided writeup with no dissent is a reviewer red flag.\n"
+                 "> - Prefer concrete numbers and examples over abstract framing — \"revenue grew 18% YoY\" beats \"revenue grew significantly\".\n"
+                 "> - Don't pad to look thorough. Skip transition paragraphs, executive-summary restatements, and \"in conclusion\" wrap-ups. End where the analysis ends.\n"
+                 "> - In your own chat output: skip the preamble (\"I'll first fetch the filings…\") and the trailing summary (\"I've written the report — here's what it covers\"). The deliverable is the file; chat is overhead.\n\n"
+                 "> **Prose shape — research deliverable.**\n"
+                 "> - One document per deliverable. Don't split a 400-line briefing into four 100-line files for tidiness.\n"
+                 "> - Headings and bullet lists are fine; tables when comparing entities. Don't invent novel document structures — use the conventions of the genre (briefing, due-diligence memo, literature review).\n"
+                 "> - No code in prose deliverables unless the objective explicitly asks for it (e.g. a methodology appendix).\n\n")
+            (str "> **Output style — save tokens.** The user's quota covers every comment, docstring, and chat line you emit. Documentation is added out-of-band after the run finishes, so do not produce any here.\n"
+                 "> - NO comments. NO docstrings. None on public APIs, none on private helpers, none on tests.\n"
+                 "> - The ONLY exception is a comment the language or tooling reads as a directive — `# type: ignore`, `// @ts-ignore`, `// eslint-disable-next-line`, `;; clj-kondo: ...`, build-tool pragmas, etc. Include those only when functionally required for the code to type-check, lint, or run. Pure documentation directives like JSDoc / docstring blocks do NOT qualify.\n"
+                 "> - Don't restate what the code does, don't write `// added for X`, `# TODO`, `;; removed Y`, decorative banners, or comments referencing the current task.\n"
+                 "> - In your own chat output: skip the preamble (\"I'll first read the files…\") and the trailing summary (\"I've created X — here's what it does\"). Just do the work and stop.\n\n"
+                 "> **Code shape — keep it minimal.** Do the simplest thing that satisfies *this iteration's* objective. Don't generalise for needs not on the plan.\n"
+                 "> - Plain functions on plain data first (maps, vectors, records). Do NOT introduce protocols, defrecords, multimethods, interfaces, abstract classes, factories, registries, or \"manager\"/\"service\"/\"handler\" wrapper layers unless the objective explicitly requires runtime polymorphism that functions cannot express. A possible second implementation later is not a reason to add one now.\n"
+                 "> - No defensive try/catch around code you control. Validate only at trust boundaries (user input, network, disk).\n"
+                 "> - No new dependencies unless the objective names one. Stdlib first.\n"
+                 "> - Inline before you abstract. Three obvious lines beat a clever one-line abstraction. If two functions look similar, leave them — don't refactor to dedupe unless the objective asks.\n"
+                 "> - One namespace / module per concern. Don't split a 40-line file into four 10-line files for tidiness.\n\n"))
           "# Objective\n\n"
           (:objective packet)
           (when (seq plan)
@@ -391,6 +409,27 @@
       (log/warn "Failed to read snapshot — starting fresh" {:message (ex-message e)})
       nil)))
 
+(defn find-snapshot
+  "Public lookup: returns the snapshot map at ~/.morpheus/runs/{slug}/
+   morpheus-run-snapshot.edn for a given project-dir, or nil if none exists
+   or its work-dir has gone away. Used by --polish-only to find the work-dir
+   to operate on without rerunning the engine."
+  [project-dir]
+  (try
+    (when project-dir
+      (let [home (System/getProperty "user.home")
+            slug (-> project-dir io/file .getCanonicalFile .getName)
+            path (str home "/.morpheus/runs/" slug "/morpheus-run-snapshot.edn")
+            f    (io/file path)]
+        (when (.exists f)
+          (let [snap (read-snapshot path)]
+            (when (.exists (io/file (:work-dir snap "")))
+              snap)))))
+    (catch Exception e
+      (log/warn "Failed to read snapshot"
+                {:project-dir project-dir :message (ex-message e)})
+      nil)))
+
 (defn- generate-project-claude-md! [run work-dir]
   (let [config    (:config run)
         objective (:objective config)
@@ -426,9 +465,10 @@
         ;; basename of project-dir, used to strip wrong path prefixes from plan
         ;; steps the supervisor produces (e.g. "kanban-full/src/" → "src/")
         proj-prefix   (some-> (get-in config [:project-dir])
-                               io/file .getName)]
+                               io/file .getName)
+        judge-mode    (or (:judge-mode config) :code)]
     (reset! (:live-output run) "")
-    (cc/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix))
+    (cc/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix judge-mode))
     (emit! run {:type           :iteration-started
                 :iteration      iteration
                 :work-dir       work-dir
@@ -486,7 +526,7 @@
                                    :phase-ended? phase-ended?
                                    :exhausted? rl?
                                    :quota-message (when rl?
-                                                    (exhaustion-message
+                                                    (llm/exhaustion-message
                                                       (str (:stdout cc-result)
                                                            "\n"
                                                            (:stderr cc-result)))))]
@@ -509,9 +549,102 @@
 (defn- finish-run! [run run-config work-dir reason iteration]
   (set-state! run :done)
   (when (:generate-claude-md? run-config true)
-    (generate-project-claude-md! run work-dir))
+    ;; Best-effort; a quota-exhausted final LLM call shouldn't tip a verified
+    ;; run into :error. The user can re-run later if they want the meta-md.
+    (try
+      (generate-project-claude-md! run work-dir)
+      (catch Exception e
+        (log/warn "Skipped project CLAUDE.md generation"
+                  {:message (ex-message e)
+                   :cause   (:cause (ex-data e))}))))
   (store/persist-run! run)
   (emit! run {:type :run-complete :reason reason :iteration iteration}))
+
+(def ^:private polish-claude-md
+  (str "> **Polish pass — comments only.**\n"
+       "> Verification has just passed for this project. This iteration is "
+       "ONLY for back-filling brief WHY comments on non-obvious code in the "
+       "files that already exist. You must NOT change behaviour, NOT add new "
+       "files, NOT remove or rename anything.\n"
+       ">\n"
+       "> Rules:\n"
+       "> - Add a comment ONLY where a reader would otherwise be confused: "
+       "workarounds, business rules, subtle invariants, surprising behaviour, "
+       "API quirks, performance hacks. Be selective — most code does not "
+       "need a comment.\n"
+       "> - One short line per comment. No multi-paragraph blocks. No "
+       "decorative banners.\n"
+       "> - Skip self-explanatory code. Skip tests. Skip obvious helpers.\n"
+       "> - Do NOT add docstrings on every function — only the few with a "
+       "non-obvious contract that the function name does not already convey.\n"
+       "> - If a file already has adequate comments, leave it alone.\n"
+       "> - In your chat output: no preamble, no trailing summary. Edit the "
+       "files and stop.\n"))
+
+(defn run-polish-pass!
+  "Best-effort comment back-fill after verification. Runs one CC pass with a
+   purpose-built CLAUDE.md, commits the result. Quota exhaustion or any
+   subprocess error is logged and skipped — the verified run still finalises.
+   Public so the standalone --polish-only CLI command can reuse it."
+  [run work-dir iteration]
+  (try
+    (let [config        (:config run)
+          timeout-ms    (:timeout-ms config 300000)
+          exec-cfg      (or (:executor-model-config config)
+                            (:model-config config))
+          primary-model (:model-id exec-cfg)]
+      (cc/write-claude-md! work-dir polish-claude-md)
+      (emit! run {:type :polish-started :iteration iteration})
+      (let [result (run-with-fallback!
+                     run
+                     {:work-dir     work-dir
+                      :prompt       "Add WHY comments per CLAUDE.md. Be selective; do not change behaviour."
+                      :timeout-ms   timeout-ms
+                      :model        primary-model
+                      :model-config exec-cfg
+                      :on-output    (fn [line]
+                                      (swap! (:live-output run) str line "\n")
+                                      (emit! run {:type      :output-line
+                                                  :iteration iteration
+                                                  :line      line}))}
+                     config)]
+        (cond
+          (rate-limited? result)
+          (do (log/warn "Polish pass quota-exhausted — skipping")
+              (emit! run {:type      :polish-skipped
+                          :reason    :exhausted
+                          :iteration iteration}))
+
+          (pos? (:exit result 0))
+          (do (log/warn "Polish pass exited non-zero — skipping commit"
+                        {:exit (:exit result)})
+              (emit! run {:type      :polish-skipped
+                          :reason    :non-zero-exit
+                          :exit      (:exit result)
+                          :iteration iteration}))
+
+          :else
+          (do (git-sh work-dir "add" "-A")
+              (git-sh work-dir "commit" "-q" "--allow-empty"
+                      "-m" (str "morpheus:polish iter-" iteration))
+              (emit! run {:type :polish-complete :iteration iteration})))))
+    (catch Exception e
+      (log/warn "Polish pass failed — finalising verified run anyway"
+                {:message (ex-message e)})
+      (emit! run {:type      :polish-skipped
+                  :reason    :error
+                  :message   (ex-message e)
+                  :iteration iteration}))))
+
+(defn- finish-verified!
+  "Shared exit-path for verified runs: commit the phase, optionally run the
+   polish pass, then finalise. The three places that transition to a
+   verified-done state share this so the polish-pass toggle stays consistent."
+  [run run-config work-dir iteration commit-phase!]
+  (commit-phase!)
+  (when (:polish-pass? run-config)
+    (run-polish-pass! run work-dir iteration))
+  (finish-run! run run-config work-dir :verified iteration))
 
 (defn- init-run! [run run-config snapshot]
   (let [run-id    (:run-id run)
@@ -550,16 +683,19 @@
                         (reset! (:control-packet run) (:control-packet snapshot)))
         _             (emit! run {:type      (if resuming? :run-resumed :run-started)
                                   :run-id    run-id
-                                  :objective (:objective run-config)})
-        [start-iter start-packet]
-        (if resuming?
-          [(inc (count (:iterations snapshot))) (:control-packet snapshot)]
-          (let [seed (supervisor/bootstrap run-config)]
-            [1 (build-next-packet run-config seed [] nil initial-state)]))]
+                                  :objective (:objective run-config)})]
+    ;; Both bootstrap and resume route through build-next-packet in execute!:
+    ;; resume regenerates the next packet from snapshot evidence (avoiding the
+    ;; old wasted-iteration where the snapshotted packet was re-executed),
+    ;; bootstrap calls it with empty evidence and a synthesized seed packet.
+    ;; The supervisor LLM call is wrapped in retry-on-exhaustion in execute!.
     {:work-dir      work-dir
      :initial-state initial-state
-     :start-iter    start-iter
-     :start-packet  start-packet}))
+     :start-iter    (if resuming? (inc (count (:iterations snapshot))) 1)
+     :resuming?     resuming?
+     :prior-packet  (if resuming?
+                      (:control-packet snapshot)
+                      (supervisor/bootstrap run-config))}))
 
 (defn- iteration-context [run run-config ev iteration]
   (let [verified?        (verification-passed? (:verification ev))
@@ -630,8 +766,7 @@
                  (update iters (dec (count iters)) dissoc :review)
                  iters)))
       (if (and (:verified? ctx) (not feedback))
-        (do (commit-phase!)
-            (finish-run! run run-config work-dir :verified iteration)
+        (do (finish-verified! run run-config work-dir iteration commit-phase!)
             [:done])
         (do (commit-phase!)
             (when feedback
@@ -653,8 +788,7 @@
         ;; act on it — do not auto-terminate on verified, and bump the
         ;; iteration cap if the next iteration would exceed it.
         (and (:verified? ctx) (not feedback))
-        (do (commit-phase!)
-            (finish-run! run run-config work-dir :verified iteration)
+        (do (finish-verified! run run-config work-dir iteration commit-phase!)
             [:done])
 
         :else
@@ -665,15 +799,49 @@
                     (next-packet-after-step run run-config control-packet
                                             initial-state action)])))))
 
-(defn- emit-pause!
+(defn emit-pause!
   "Marks the run paused and announces it. The actual `<! resume-ch` happens
-   inline in execute! — `<!` only works lexically inside (go ...)."
+   inline in execute! — `<!` only works lexically inside (go ...). Public
+   so retry-on-exhaustion can expand to call it from caller namespaces."
   [run iteration ctx]
   (set-state! run :paused)
   (emit! run (merge {:type :run-paused :iteration iteration}
                     (select-keys ctx [:verified? :milestone? :phase-ended?
                                       :review :review-pause?
                                       :exhausted? :quota-message]))))
+
+(defmacro retry-on-exhaustion
+  "Wraps an LLM-throwing expression so a quota-exhausted call pauses the run
+   instead of crashing it. Must be invoked inside the (go ...) block in
+   execute! — the expansion contains `<!` and `recur` that only work in
+   that lexical context.
+
+   On :cause :exhausted: emits :run-paused with :exhausted? true and the
+   quota message, awaits resume on (:resume-ch run), and retries body. On
+   user :abort during the pause: throws ex-info {:cause :user-abort} which
+   the top-level catch in execute! recognises as a clean exit (no :run-error)."
+  [run iteration & body]
+  `(loop []
+     (let [r# (try
+                {:ok (do ~@body)}
+                (catch clojure.lang.ExceptionInfo e#
+                  (let [d# (ex-data e#)]
+                    (if (= :exhausted (:cause d#))
+                      {:exhausted true
+                       :message   (or (:message d#) (.getMessage e#))}
+                      (throw e#)))))]
+       (if (:exhausted r#)
+         (do (emit-pause! ~run ~iteration
+                          {:exhausted? true :quota-message (:message r#)})
+             (let [a# (<! (:resume-ch ~run))]
+               (set-state! ~run :running)
+               (if (= :abort (:action a#))
+                 (do (set-state! ~run :aborted)
+                     (emit! ~run {:type :run-aborted})
+                     (throw (ex-info "user aborted run during exhaustion pause"
+                                     {:cause :user-abort})))
+                 (recur))))
+         (:ok r#)))))
 
 (defn execute!
   "Starts the Wiggum loop in a go-block. Returns the run map immediately.
@@ -687,8 +855,17 @@
     (go
       (set-state! run :running)
       (try
-        (let [{:keys [work-dir initial-state start-iter start-packet]}
-              (init-run! run run-config snapshot)]
+        (let [{:keys [work-dir initial-state start-iter resuming? prior-packet]}
+              (init-run! run run-config snapshot)
+              start-packet (retry-on-exhaustion run start-iter
+                             (build-next-packet
+                               run-config
+                               prior-packet
+                               (if resuming?
+                                 (recent-evidence (:iterations run) 3)
+                                 [])
+                               nil
+                               initial-state))]
           (loop [iteration      start-iter
                  control-packet start-packet]
             (reset! (:control-packet run) control-packet)
@@ -702,7 +879,8 @@
               (emit! run {:type :run-aborted :run-id run-id})
 
               :else
-              (let [ev (run-iteration! run work-dir iteration control-packet)
+              (let [ev (retry-on-exhaustion run iteration
+                         (run-iteration! run work-dir iteration control-packet))
                     _  (swap! (:iterations run) conj ev)
                     _  (write-snapshot! run)
                     _  (store/persist-run! run)
@@ -715,29 +893,48 @@
                     (emit-pause! run iteration ctx)
                     (let [action  (<! (:resume-ch run))
                           _       (set-state! run :running)
-                          outcome (apply-resume-action action run run-config work-dir
-                                                       iteration control-packet
-                                                       initial-state ctx commit-phase!)]
+                          outcome (retry-on-exhaustion run iteration
+                                    (apply-resume-action action run run-config work-dir
+                                                         iteration control-packet
+                                                         initial-state ctx commit-phase!))]
                       (case (first outcome)
                         :recur (recur (nth outcome 1) (nth outcome 2))
                         :done  nil)))
 
                   (:verified? ctx)
-                  (do (commit-phase!)
-                      (finish-run! run run-config work-dir :verified iteration))
+                  (finish-verified! run run-config work-dir iteration commit-phase!)
 
                   :else
                   (do (commit-phase!)
                       (recur (inc iteration)
-                             (build-next-packet run-config control-packet
-                                                (recent-evidence (:iterations run) 3)
-                                                (consume-steer! run)
-                                                initial-state))))))))
+                             (retry-on-exhaustion run iteration
+                               (build-next-packet run-config control-packet
+                                                  (recent-evidence (:iterations run) 3)
+                                                  (consume-steer! run)
+                                                  initial-state)))))))))
 
         (catch Exception e
-          (log/error e "Wiggum run crashed" {:run-id run-id :message (.getMessage e)})
-          (set-state! run :error)
-          (emit! run {:type :run-error :message (.getMessage e)}))))
+          (let [d (when (instance? clojure.lang.ExceptionInfo e) (ex-data e))]
+            (if (= :user-abort (:cause d))
+              ;; Clean abort during an exhaustion pause — state is already
+              ;; :aborted and :run-aborted has been emitted by the macro.
+              (log/info "Wiggum run aborted during exhaustion pause"
+                        {:run-id run-id})
+              (let [;; A snapshot exists when at least one iteration completed.
+                    ;; Resume from there is safe because the engine now always
+                    ;; regenerates the next packet from snapshot evidence.
+                    iters     (count @(:iterations run))
+                    snap?     (pos? iters)
+                    proj-dir  (:project-dir run-config)]
+                (log/error e "Wiggum run crashed"
+                           {:run-id run-id :message (.getMessage e)})
+                (set-state! run :error)
+                (emit! run (cond-> {:type        :run-error
+                                    :message     (.getMessage e)
+                                    :iteration   iters
+                                    :continuable? snap?}
+                             (and snap? proj-dir)
+                             (assoc :project-dir proj-dir)))))))))
     run))
 
 (defn step!

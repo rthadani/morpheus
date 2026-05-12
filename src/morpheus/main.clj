@@ -35,6 +35,10 @@
                                   (assoc acc :view-only? true))
         "--fresh"          (recur (rest remaining)
                                   (assoc acc :fresh? true))
+        "--polish"         (recur (rest remaining)
+                                  (assoc acc :polish-pass? true))
+        "--polish-only"    (recur (rest remaining)
+                                  (assoc acc :polish-only? true))
         (recur (rest remaining) (assoc acc :edn-file (first remaining)))))))
 
 (defn- detect-type [cfg]
@@ -46,6 +50,8 @@
                         "  DAG graphs must have :graph/nodes\n"
                         "  Wiggum configs must have :objective")
                    {:keys (keys cfg)}))))
+
+(declare invocation)
 
 (defn- print-event [event]
   (case (:type event)
@@ -101,6 +107,16 @@
     (println (str "Rate limit - retrying with " (:fallback event)
                   " (after " (:delay-ms event) "ms)"))
 
+    :polish-started
+    (println "\nPolish pass starting (back-fill WHY comments)")
+
+    :polish-complete
+    (println "  polish done")
+
+    :polish-skipped
+    (println (str "  polish skipped — " (name (:reason event))
+                  (when-let [m (:message event)] (str ": " m))))
+
     :node-complete
     (println (str "  done " (name (:node-id event)) " (" (:duration event) "ms)"))
 
@@ -119,7 +135,16 @@
     (println "\nRun aborted")
 
     :run-error
-    (println (str "\nRun crashed - " (:message event)))
+    (do
+      (println (str "\nRun crashed at iter " (:iteration event)
+                    " - " (:message event)))
+      (when (:continuable? event)
+        (let [cmd     (invocation)
+              edn-arg (or (System/getProperty "morpheus.spec-file") "<spec.edn>")
+              proj    (or (:project-dir event) "<project-dir>")]
+          (println "")
+          (println "Run is continuable — snapshot is intact. Resume with:")
+          (println (str "  " cmd " " edn-arg " --project-dir " proj)))))
 
     (:state-change :control-changed) nil
 
@@ -178,19 +203,61 @@
       (str "java -jar " (or (re-find #"\S+\.jar" cmd) "morpheus.jar"))
       "clj -M:run")))
 
+(defn- run-polish-only!
+  "Standalone polish: load the snapshot for project-dir and run one polish
+   pass against the saved work-dir. Prints events as they arrive and exits."
+  [project-dir]
+  (if-let [snap (wiggum/find-snapshot project-dir)]
+    (let [work-dir (:work-dir snap)
+          event-ch (async/chan 256)
+          mult     (async/mult event-ch)
+          tap-ch   (async/chan 256)
+          run      {:config       (:config snap)
+                    :run-id       (:run-id snap)
+                    :live-output  (atom "")
+                    :event-ch     event-ch
+                    :event-mult   mult
+                    :event-log    (atom [])}
+          printer  (future
+                     (loop []
+                       (when-let [ev (async/<!! tap-ch)]
+                         (print-event ev)
+                         (recur))))]
+      (println (str "Polishing " work-dir))
+      (async/tap mult tap-ch)
+      (try
+        (wiggum/run-polish-pass! run work-dir
+                                 (count (:iterations snap [])))
+        (finally
+          (async/close! event-ch)
+          @printer)))
+    (do (println (str "No snapshot found for " project-dir))
+        (System/exit 1))))
+
 (defn -main [& args]
-  (let [{:keys [edn-file project-dir step-once? max-iterations view-only? fresh?]
+  (let [{:keys [edn-file project-dir step-once? max-iterations
+                view-only? fresh? polish-pass? polish-only?]
          :as   opts} (parse-args args)]
+
+    (when polish-only?
+      (when-not project-dir
+        (println "--polish-only requires --project-dir")
+        (System/exit 1))
+      (run-polish-only! project-dir)
+      (shutdown-agents)
+      (System/exit 0))
 
     (when-not (or edn-file (and view-only? project-dir))
       (let [cmd (invocation)]
-        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>] [--fresh]"))
+        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>] [--fresh] [--polish]"))
         (println (str "       " cmd " --view --project-dir <path>"))
+        (println (str "       " cmd " --polish-only --project-dir <path>"))
         (println)
         (println "Examples:")
         (println (str "  " cmd " graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react"))
         (println (str "  " cmd " graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step"))
-        (println (str "  " cmd " --view --project-dir /tmp/todo-react")))
+        (println (str "  " cmd " --view --project-dir /tmp/todo-react"))
+        (println (str "  " cmd " --polish-only --project-dir /tmp/todo-react")))
       (System/exit 1))
 
     (when view-only?
@@ -209,6 +276,10 @@
 
     (let [raw   (edn/read-string (slurp edn-file))
           rtype (detect-type raw)]
+
+      ;; Stash the spec path so print-event's :run-error hint can echo a
+      ;; ready-to-paste resume command.
+      (System/setProperty "morpheus.spec-file" edn-file)
 
       (println (str "Loading " edn-file " [" (name rtype) "]"))
 
@@ -230,7 +301,8 @@
                           (cond-> raw
                             project-dir    (assoc :project-dir project-dir)
                             step-once?     (assoc :step-once? true)
-                            max-iterations (assoc :max-iterations max-iterations)))
+                            max-iterations (assoc :max-iterations max-iterations)
+                            polish-pass?   (assoc :polish-pass? true)))
 
                         :dag
                         (engine/execute! run-id raw

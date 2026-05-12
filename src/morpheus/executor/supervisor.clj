@@ -102,28 +102,45 @@ rather than the executor racing through multiple phases at once.
   to earlier parts that are already done.
 
 ## Output format
-Respond with a JSON object and nothing else:
+Respond with a JSON object and nothing else. No preamble, no markdown fences,
+no trailing prose, no `//` or `/* */` comments inside the JSON, no fields
+beyond those listed below. Output tokens are billed against the user's quota,
+so be ruthless about omitting anything that does not change what the executor
+will do.
+
 {
   \"objective\":      \"<one sentence: the concrete deliverable for this iteration>\",
   \"constraints\":    [\"<hard limit on approach>\", ...],
   \"anti_goals\":     [\"<output or action to avoid>\", ...],
-  \"brief\":          \"<2-3 sentences: what the evidence shows and why you chose this direction>\",
+  \"brief\":          \"<at most one short sentence>\",
   \"plan\":           [\"<step 1>\", \"<step 2>\", ...],
   \"expected_files\": [\"<path/to/file>\", \"<dir/>\", ...]
 }
 
-constraints and anti_goals: at most 3 items each.
+Field rules:
 
-plan: include only when the executor needs explicit direction — first iteration,
-after a failure, or when pivoting to a new part of the goal. Steps must be
-concrete enough to execute directly. Omit when the executor is already on track.
+- objective: required. One sentence, no rationale, no examples.
+- expected_files: required. Paths relative to the project root, trailing slash
+  for directories. Include every deliverable type — source, tests, config,
+  docs. Paths only, no commentary inside the array.
+- constraints, anti_goals: at most 3 items each. Each item is a single rule,
+  not a paragraph. The control packet REPLACES the executor's CLAUDE.md
+  wholesale — there is no merge with the prior packet. Any rule that should
+  remain in force MUST be re-listed; rules you omit are dropped. With the ≤3
+  cap, choose the most load-bearing rules for this iteration (e.g. a
+  phase-boundary anti_goal must persist until the phase is done). Omit the
+  field only when the iteration genuinely has no rules to enforce.
+- brief: omit by default. Include only when the iteration changes direction
+  (pivot, regression, restore) and the executor needs to know why. Even then,
+  one short sentence — not a summary of the evidence.
+- plan: omit by default. Include only on the first iteration, after a
+  verification failure, or when pivoting. One terse imperative line per step,
+  no introductions, no trailing notes.
 
-expected_files: required. List the specific files or directories that must exist
-for this iteration to be considered complete. Use paths relative to the project
-root. Use a trailing slash for directories (e.g. \"src/\"). Include every
-deliverable type: source files, test files, config files, and documentation.
-For a documentation phase, list the expected docs (e.g. \"README.md\",
-\"CLAUDE.md\"). These are used to verify progress on the next review.")
+Never decorate the JSON with explanations, status headers, or recap text.
+The control packet is fed verbatim into the next iteration's CLAUDE.md, so
+every extra word costs the user twice — once on output here, once on input
+to the next iteration.")
 
 (defn- format-control-packet [packet]
   (str/join "\n"
@@ -135,19 +152,35 @@ For a documentation phase, list the expected docs (e.g. \"README.md\",
       (seq (:expected-files packet))
       (conj (str "  expected-files: " (str/join ", " (:expected-files packet)))))))
 
+(defn- needs-output-tail?
+  "Successful iterations are fully described by the structured summary
+   (files written/edited, verification status, expected_files check, judge
+   review). Only include CC's raw stdout when something the summary doesn't
+   already explain may be hiding in it: non-zero CC exit, failed verification,
+   or token exhaustion."
+  [ev]
+  (or (pos? (:exit-code ev 0))
+      (when-let [v (:verification ev)] (pos? (:exit v 0)))
+      (:exhausted? ev)))
+
 (defn- format-evidence-block [evidence-list]
   (if (empty? evidence-list)
     "No iterations have run yet."
     (str/join "\n\n"
       (map (fn [ev]
              (str "---\n" (evidence/summarise ev)
-                  (when-let [out (:output ev)]
-                    (let [trimmed (str/trim out)
-                          snip    (if (> (count trimmed) 2000)
-                                    (str (subs trimmed 0 2000) "\n… (truncated)")
+                  ;; Tail (not head): the actual conclusion or final error
+                  ;; lives at the end of CC's transcript; the head is intro
+                  ;; chatter. Capped tight to keep supervisor input cheap.
+                  (when (and (needs-output-tail? ev) (seq (:output ev)))
+                    (let [trimmed (str/trim (:output ev))
+                          tail    (if (> (count trimmed) 600)
+                                    (str "… (earlier output omitted)\n"
+                                         (subs trimmed (- (count trimmed) 600)))
                                     trimmed)]
-                      (str "\n  Output snippet:\n"
-                           (str/join "\n" (map #(str "    " %) (str/split-lines snip))))))))
+                      (str "\n  Output tail:\n"
+                           (str/join "\n" (map #(str "    " %)
+                                               (str/split-lines tail))))))))
            evidence-list))))
 
 (defn- build-prompt
