@@ -5,7 +5,8 @@
    [clojure.java.io    :as io]
    [clojure.edn        :as edn]
    [taoensso.timbre    :as log]
-   [clojure.core.async :as async]))
+   [clojure.core.async :as async]
+   [morpheus.slug      :as slug]))
 
 (defn create-store []
   (atom {}))
@@ -54,13 +55,11 @@
     :dag    (dag-summary run)))
 
 (defn- cache-path
-  "~/.morpheus/runs/{slug}/morpheus-ui-state.edn — slug is the basename of
-   the canonical project-dir path. Returns nil if project-dir is unset."
+  "~/.morpheus/runs/{slug}/morpheus-ui-state.edn. Slug is the snake-cased
+   canonical basename of project-dir. Returns nil if project-dir is unset."
   [project-dir]
-  (when project-dir
-    (let [home (System/getProperty "user.home")
-          slug (-> project-dir io/file .getCanonicalFile .getName)]
-      (str home "/.morpheus/runs/" slug "/morpheus-ui-state.edn"))))
+  (when-let [slug (slug/project-slug project-dir)]
+    (str (System/getProperty "user.home") "/.morpheus/runs/" slug "/morpheus-ui-state.edn")))
 
 (defn persist-run!
   "Saves a Wiggum run summary to ~/.morpheus/runs/{slug}/morpheus-ui-state.edn.

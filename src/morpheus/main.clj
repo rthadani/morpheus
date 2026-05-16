@@ -16,6 +16,7 @@
    [morpheus.executor.engine  :as engine]
    [morpheus.executor.wiggum  :as wiggum]
    [morpheus.executor.store   :as store]
+   [morpheus.slug             :as slug]
    [morpheus.system           :as sys])
   (:gen-class))
 
@@ -284,17 +285,20 @@
       (println (str "Loading " edn-file " [" (name rtype) "]"))
 
       (when (and fresh? project-dir)
-        (let [home (System/getProperty "user.home")
-              slug (-> project-dir java.io.File. .getCanonicalFile .getName)
-              wd   (str home "/.morpheus/runs/" slug)]
-          (when (.exists (java.io.File. wd))
-            (println (str "Removing cached work-dir: " wd))
-            (shell/sh "rm" "-rf" wd))))
+        (when-let [s (slug/project-slug project-dir)]
+          (let [wd (str (System/getProperty "user.home") "/.morpheus/runs/" s)]
+            (when (.exists (java.io.File. wd))
+              (println (str "Removing cached work-dir: " wd))
+              (shell/sh "rm" "-rf" wd)))))
 
       (sys/start!)
       (let [run-store (get-in @sys/system [:run-store])
             port      (or (some-> (System/getenv "PORT") parse-long) 7777)
-            run-id    1
+            run-id    (or (case rtype
+                            :wiggum (slug/project-slug project-dir)
+                            :dag    (slug/graph-slug edn-file))
+                          (slug/graph-slug edn-file)
+                          (str "run_" (System/currentTimeMillis)))
             run       (case rtype
                         :wiggum
                         (wiggum/execute! run-id

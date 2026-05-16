@@ -36,7 +36,8 @@
    [morpheus.executor.llm          :as llm]
    [morpheus.executor.store        :as store]
    [morpheus.executor.supervisor   :as supervisor]
-   [morpheus.graph.context         :as graph-ctx]))
+   [morpheus.graph.context         :as graph-ctx]
+   [morpheus.slug                  :as slug]))
 
 (defn- render-run-config
   "Substitutes {{slot}} placeholders in :objective and :acceptance-criteria
@@ -355,10 +356,8 @@
   "Stable cache path under ~/.morpheus/runs/{slug}/ derived from project-dir.
    Returns nil when no project-dir is set (ephemeral tempdir is used in that case)."
   [run-config]
-  (when-let [pd (:project-dir run-config)]
-    (let [home (System/getProperty "user.home")
-          slug (-> pd io/file .getCanonicalFile .getName)]
-      (str home "/.morpheus/runs/" slug))))
+  (when-let [slug (slug/project-slug (:project-dir run-config))]
+    (str (System/getProperty "user.home") "/.morpheus/runs/" slug)))
 
 (defn- work-dir-empty? [path]
   (let [f (io/file path)]
@@ -419,10 +418,9 @@
    to operate on without rerunning the engine."
   [project-dir]
   (try
-    (when project-dir
-      (let [home (System/getProperty "user.home")
-            slug (-> project-dir io/file .getCanonicalFile .getName)
-            path (str home "/.morpheus/runs/" slug "/morpheus-run-snapshot.edn")
+    (when-let [slug (slug/project-slug project-dir)]
+      (let [path (str (System/getProperty "user.home") "/.morpheus/runs/"
+                      slug "/morpheus-run-snapshot.edn")
             f    (io/file path)]
         (when (.exists f)
           (let [snap (read-snapshot path)]

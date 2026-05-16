@@ -13,6 +13,7 @@
    [morpheus.executor.engine  :as engine]
    [morpheus.executor.wiggum  :as wiggum]
    [morpheus.executor.store   :as store]
+   [morpheus.slug             :as slug]
    [morpheus.ui.components    :as ui]))
 
 (defn html-resp [hiccup]
@@ -266,7 +267,7 @@
 
 (defn stream-handler [run-store]
   (fn [{:keys [path-params] :as req}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -326,7 +327,7 @@
 
 (defn checkpoint-handler [run-store]
   (fn [{:keys [path-params form-params]}]
-    (let [run-id   (parse-long (:id path-params))
+    (let [run-id   (:id path-params)
           node-id  (keyword (:node-id path-params))
           action   (keyword (get form-params "action"))
           feedback (get form-params "feedback" "")
@@ -346,7 +347,7 @@
 
 (defn node-detail-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id  (parse-long (:id path-params))
+    (let [run-id  (:id path-params)
           node-id (keyword (:node-id path-params))
           run     (store/get-run run-store run-id)]
       (if-not run
@@ -363,27 +364,29 @@
   (fn [{:keys [body-params]}]
     (let [graph  (:graph body-params)
           ctx    (:context body-params {})
-          run-id (System/currentTimeMillis)
+          run-id (or (slug/slugify (:graph-name body-params))
+                     (str "dag_" (System/currentTimeMillis)))
           run    (engine/execute! run-id graph ctx)]
       (store/add-run! run-store run)
       {:status  201
        :headers {"Location" (str "/runs/" run-id)}
-       :body    (str run-id)})))
+       :body    run-id})))
 
 (defn start-wiggum-handler [run-store]
   (fn [{:keys [body-params]}]
-    (let [run-id (System/currentTimeMillis)
-          _      (when-let [pd (:project-dir body-params)]
-                   (store/load-ui-state! run-store pd))
+    (let [pd     (:project-dir body-params)
+          run-id (or (slug/project-slug pd)
+                     (str "wiggum_" (System/currentTimeMillis)))
+          _      (when pd (store/load-ui-state! run-store pd))
           run    (wiggum/execute! run-id body-params)]
       (store/add-run! run-store run)
       {:status  201
        :headers {"Location" (str "/runs/" run-id)}
-       :body    (str run-id)})))
+       :body    run-id})))
 
 (defn wiggum-resume-handler [run-store]
   (fn [{:keys [path-params form-params]}]
-    (let [run-id   (parse-long (:id path-params))
+    (let [run-id   (:id path-params)
           run      (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -403,7 +406,7 @@
 
 (defn steer-handler [run-store]
   (fn [{:keys [path-params form-params]}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -416,7 +419,7 @@
 
 (defn abort-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -427,7 +430,7 @@
 
 (defn wiggum-step-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -436,7 +439,7 @@
 
 (defn wiggum-auto-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -445,7 +448,7 @@
 
 (defn run-page-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id (parse-long (:id path-params))
+    (let [run-id (:id path-params)
           run    (store/get-run run-store run-id)]
       (if-not run
         {:status 404 :body "Run not found"}
@@ -455,7 +458,7 @@
 
 (defn iteration-detail-handler [run-store]
   (fn [{:keys [path-params]}]
-    (let [run-id      (parse-long (:id path-params))
+    (let [run-id      (:id path-params)
           n           (parse-long (:n path-params))
           run         (store/get-run run-store run-id)
           ev          (when run (nth @(:iterations run) (dec n) nil))
@@ -476,10 +479,21 @@
      :body    (slurp r)}
     {:status 404 :body "style.css not found"}))
 
+(defn favicon-handler [_]
+  (if-let [r (io/resource "public/favicon.svg")]
+    {:status  200
+     :headers {"Content-Type"  "image/svg+xml; charset=utf-8"
+               "Cache-Control" "public, max-age=86400"}
+     :body    (slurp r)}
+    {:status 404 :body "favicon not found"}))
+
 (defn create-router [run-store]
   (ring/ring-handler
     (ring/router
       [["/style.css"   {:get css-handler}]
+       ["/favicon.svg" {:get favicon-handler}]
+       ;; .ico left as 204 — modern browsers follow the <link rel="icon"
+       ;; type="image/svg+xml"> in <head> and never hit /favicon.ico.
        ["/favicon.ico" {:get (fn [_] {:status 204 :body ""})}]
        ["/runs"
         ["" {:post (start-run-handler run-store)}]
