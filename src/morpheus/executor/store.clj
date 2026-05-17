@@ -55,7 +55,7 @@
     :dag    (dag-summary run)))
 
 (defn- cache-path
-  "~/.morpheus/runs/{slug}/morpheus-ui-state.edn. Slug is the snake-cased
+  "~/.morpheus/runs/{slug}/morpheus-ui-state.edn. Slug is the kebab-cased
    canonical basename of project-dir. Returns nil if project-dir is unset."
   [project-dir]
   (when-let [slug (slug/project-slug project-dir)]
@@ -97,14 +97,18 @@
 
 (defn load-ui-state!
   "Loads ~/.morpheus/runs/{slug}/morpheus-ui-state.edn into the store so a
-   previous run stays visible after restart. project-dir is used only to
-   derive the slug; the file itself lives in the cache."
+   previous run stays visible after restart. project-dir is used both to
+   derive the slug (the file's cache path) and to override :run-id in the
+   loaded summary — older snapshots stored numeric run-ids that no longer
+   match URL routing."
   [store project-dir]
   (try
     (when-let [path (cache-path project-dir)]
       (let [f (io/file path)]
         (when (.exists f)
-          (let [summary (edn/read-string (slurp f))
+          (let [slug    (slug/project-slug project-dir)
+                summary (-> (edn/read-string (slurp f))
+                            (assoc :run-id slug))
                 run     (frozen-wiggum-run summary)]
             (swap! store assoc (:run-id run) run)
             (log/info "Loaded persisted UI state" {:run-id (:run-id run) :path path})

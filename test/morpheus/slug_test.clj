@@ -4,22 +4,22 @@
    [morpheus.slug :as slug]))
 
 (deftest slugify-handles-common-cases
-  (testing "lower-cases, collapses non-alphanumeric runs into single underscore"
-    (is (= "options_trader" (slug/slugify "Options-Trader")))
-    (is (= "kanban_react"   (slug/slugify "kanban-react")))
-    (is (= "my_cool_app"    (slug/slugify "My Cool App")))
-    (is (= "foo_bar_baz"    (slug/slugify "foo bar  baz")))
-    (is (= "a_b"            (slug/slugify "a---b"))
-        "consecutive non-alphanumerics collapse to a single underscore"))
+  (testing "lower-cases, collapses non-alphanumeric runs into single hyphen"
+    (is (= "options-trader" (slug/slugify "Options-Trader")))
+    (is (= "kanban-react"   (slug/slugify "kanban-react")))
+    (is (= "my-cool-app"    (slug/slugify "My Cool App")))
+    (is (= "foo-bar-baz"    (slug/slugify "foo bar  baz")))
+    (is (= "a-b"            (slug/slugify "a---b"))
+        "consecutive non-alphanumerics collapse to a single hyphen"))
 
-  (testing "trims leading and trailing underscores"
+  (testing "trims leading and trailing hyphens"
     (is (= "foo"            (slug/slugify "-foo-")))
     (is (= "foo"            (slug/slugify "---foo---")))
     (is (= "foo"            (slug/slugify "!!!foo!!!"))))
 
   (testing "alphanumerics survive unchanged"
     (is (= "abc123"         (slug/slugify "abc123")))
-    (is (= "v2_release"     (slug/slugify "v2-release"))))
+    (is (= "v2-release"     (slug/slugify "v2-release"))))
 
   (testing "empty / all-non-alphanumeric / nil inputs return nil"
     (is (nil? (slug/slugify "")))
@@ -28,13 +28,13 @@
     (is (nil? (slug/slugify nil)))))
 
 (deftest project-slug-derives-from-canonical-basename
-  (testing "uses basename of project-dir, lowercased and snake-cased"
+  (testing "uses basename of project-dir, lowercased and kebab-cased"
     (let [tmp (System/getProperty "java.io.tmpdir")
           dir (str tmp "/morpheus-slug-test-" (System/currentTimeMillis))
           _   (.mkdirs (java.io.File. dir))]
       (try
-        (is (re-find #"^morpheus_slug_test_\d+$" (slug/project-slug dir))
-            "basename lowercased and hyphens become underscores")
+        (is (re-find #"^morpheus-slug-test-\d+$" (slug/project-slug dir))
+            "basename lowercased and non-alphanumerics become hyphens")
         (finally
           (.delete (java.io.File. dir))))))
 
@@ -43,13 +43,13 @@
 
 (deftest graph-slug-strips-edn-extension
   (testing "strips .edn extension and slugifies the rest"
-    (is (= "wifi_qoe_service" (slug/graph-slug "graphs/wifi-qoe-service.edn")))
+    (is (= "wifi-qoe-service" (slug/graph-slug "graphs/wifi-qoe-service.edn")))
     (is (= "foo"              (slug/graph-slug "foo.edn")))
-    (is (= "options_trader"   (slug/graph-slug "/abs/path/Options-Trader.edn")))
-    (is (= "spec_generator"   (slug/graph-slug "graphs/spec-generator.edn"))))
+    (is (= "options-trader"   (slug/graph-slug "/abs/path/Options-Trader.edn")))
+    (is (= "spec-generator"   (slug/graph-slug "graphs/spec-generator.edn"))))
 
   (testing "non-.edn paths still slugify (extension preserved by slugify)"
-    (is (= "graph_yaml"       (slug/graph-slug "graph.yaml"))
+    (is (= "graph-yaml"       (slug/graph-slug "graph.yaml"))
         "if not .edn, the trailing extension is treated as another segment"))
 
   (testing "nil returns nil"
