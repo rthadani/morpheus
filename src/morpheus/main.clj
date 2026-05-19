@@ -323,9 +323,18 @@
         (when (and (= :ok result) project-dir work-dir)
           (let [dest (-> project-dir java.io.File. .getAbsolutePath)]
             (.mkdirs (java.io.File. dest))
-            (shell/sh "sh" "-c"
-                      (str "cp -r " work-dir "/. " dest "/")
-                      :dir work-dir)
+            ;; rsync excludes wiggum's internal snapshot repo + its own snapshot
+            ;; file. Falls back to cp if rsync is unavailable.
+            (let [{:keys [exit]} (shell/sh "rsync" "-a"
+                                           "--exclude=.git"
+                                           "--exclude=morpheus-run-snapshot.edn"
+                                           (str work-dir "/")
+                                           (str dest "/"))]
+              (when-not (zero? exit)
+                (shell/sh "sh" "-c"
+                          (str "cp -r " work-dir "/. " dest "/ && "
+                               "rm -rf " dest "/.git " dest "/morpheus-run-snapshot.edn")
+                          :dir work-dir)))
             (println (str "Output copied to " dest))))
 
         (sys/stop!)

@@ -269,6 +269,159 @@
                             (CSS, ASCII layout, transcript text) restated
                             elsewhere.
 
+                          The visual artifact is REFERENCE, NOT THE
+                          DELIVERABLE.  This rule is universal — applies to
+                          mockup.html, mockup.txt, and expected-session.txt
+                          equally.  Every UI-implementation phase must say:
+                            * mockup.<ext> specifies layout, components,
+                              and interaction states only.
+                            * The implementation phase MUST re-express the
+                              mockup in the idiomatic primitives of the
+                              chosen stack — never serve / paste / copy
+                              the mockup file verbatim as the running UI.
+                            * Name the idiomatic primitive in the phase
+                              body so the executor cannot fall back to
+                              static-file shortcuts.  Examples:
+                                HTMX (server-rendered)
+                                  → server routes returning HTML
+                                    fragments via hiccup / Jinja /
+                                    ERB / html/template, with `hx-get`,
+                                    `hx-post`, `hx-target`, `hx-swap`,
+                                    `hx-swap-oob`, and `hx-ext=\"sse\"`
+                                    on the elements that the mockup
+                                    shows as interactive.
+                                React / Vue / Svelte
+                                  → components + state hooks + routes;
+                                    the mockup's static HTML becomes a
+                                    tree of components, not innerHTML.
+                                iOS (SwiftUI / UIKit)
+                                  → SwiftUI Views or UIViewControllers;
+                                    mockups translate to View structs
+                                    and @State / @Binding, not
+                                    WKWebView-hosted HTML.
+                                Android (Jetpack Compose / Views)
+                                  → @Composable functions or XML layouts
+                                    + ViewModels, not WebView-hosted
+                                    HTML.
+                                React Native / Flutter
+                                  → platform widgets (View/Text,
+                                    Widget tree); mockup → widget tree,
+                                    not embedded HTML.
+                                TUI
+                                  → terminal-widget library of the
+                                    chosen stack (jline, blessed,
+                                    ratatui, urwid); mockup.txt is the
+                                    layout target, not the rendered
+                                    output.
+                                CLI
+                                  → argument parser + formatter
+                                    producing the expected-session.txt
+                                    transcript shape.
+                            * Acceptance checks must prove the
+                              re-implementation happened, not just that
+                              the mockup file exists.  Pick a grep that
+                              would fail on a verbatim copy — e.g. grep
+                              for `hx-get` in served HTML for HTMX,
+                              `@Composable` for Compose, `struct .*: View`
+                              for SwiftUI, JSX tags for React.
+
+                          Live updates rule (universal) — whenever the
+                          description calls for streaming, progress,
+                          notifications, real-time, or any push behavior,
+                          the implementation phase MUST use server-push,
+                          not client polling.  Name the idiomatic
+                          primitive in the phase body:
+                            HTMX                → `hx-ext=\"sse\"` +
+                                                  `sse-connect=\"/...\"` +
+                                                  named server events;
+                                                  the server route returns
+                                                  `text/event-stream`.
+                            React / Vue / Svelte → `EventSource` (or
+                                                  WebSocket only if the
+                                                  channel is bidirectional)
+                                                  — never `setInterval`
+                                                  fetch loops.
+                            iOS                 → URLSession streaming
+                                                  task / `bytes(for:)`
+                                                  consuming SSE, or a
+                                                  WebSocket task.
+                            Android             → OkHttp `EventSource`
+                                                  (okhttp-sse), or Ktor /
+                                                  Retrofit streaming with
+                                                  Kotlin `Flow`.
+                            React Native        → `react-native-sse`.
+                            Flutter             → `dart:io` HttpClient
+                                                  with SSE parsing, or a
+                                                  WebSocket.
+                            CLI / TUI           → stream stdout / stdin
+                                                  pipe; no `sleep`-based
+                                                  re-fetch loops.
+                          Server side, name the streaming primitive too —
+                          http-kit `with-channel` / Ring SSE, FastAPI
+                          `EventSourceResponse`, Rails
+                          `ActionController::Live`, Spring `SseEmitter`,
+                          Node `res.write` on a `text/event-stream`
+                          response, Go `http.Flusher`.
+                          Acceptance check must fail on the polling
+                          shortcut — e.g. grep the client for
+                          `setInterval(` / `setTimeout(` around fetch
+                          calls and exit non-zero if found, or grep the
+                          server for `text/event-stream` and require it
+                          present.
+
+                          Styling rule (universal) — whenever the project
+                          renders a visual UI (web / mobile / desktop),
+                          Tailwind is the default styling system.  The
+                          implementation phase MUST:
+                            * Pull Tailwind in via the stack's idiomatic
+                              integration — DO NOT handwrite a
+                              `style.css` of bespoke class rules or
+                              inline CSS-in-JS sheets when Tailwind
+                              suffices:
+                                HTMX / server-rendered HTML
+                                  → Tailwind Play CDN for quick projects,
+                                    or `@tailwindcss/cli` build for real
+                                    ones.  Use `@layer components` +
+                                    `@apply` only for repeated multi-utility
+                                    bundles, never to recreate Bootstrap.
+                                React / Vue / Svelte
+                                  → `tailwindcss` postcss plugin (Vite /
+                                    Next / Nuxt / SvelteKit preset);
+                                    utilities go on JSX/template
+                                    attributes directly.
+                                React Native
+                                  → `nativewind` (Tailwind class names
+                                    on `<View>` / `<Text>` props).
+                                Flutter
+                                  → `tailwind_native` or skip — Flutter
+                                    has its own idiomatic styling; do
+                                    not force Tailwind where it does
+                                    not fit, but state the alternative
+                                    explicitly in the phase.
+                                iOS / Android native (SwiftUI /
+                                  Compose)
+                                  → skip Tailwind — use the platform's
+                                    native styling (SwiftUI modifiers,
+                                    Compose Modifier chain); state this
+                                    explicitly in the phase so the
+                                    executor doesn't try to bolt it on.
+                            * Use the design tokens (`bg-*`, `text-*`,
+                              spacing, etc.) from the mockup — the
+                              mockup's static HTML should already carry
+                              Tailwind classes the implementation can
+                              port verbatim.
+                            * Theming (light / dark) uses Tailwind's
+                              `dark:` variant + a `data-theme`
+                              attribute, not hand-rolled
+                              `prefers-color-scheme` media queries.
+                            * Acceptance check: grep the rendered output
+                              (or component source) for Tailwind utility
+                              patterns (e.g. `class=\"[^\"]*\\b(flex|grid|p-\\d|text-)`)
+                              and fail if absent.  For native UIs
+                              (SwiftUI / Compose / Flutter), the grep is
+                              for the platform's modifier idiom
+                              instead — pick one and state it.
+
                           End with a Documentation phase covering README.md.
 
                           IMPORTANT — EDN string foot-guns inside this
