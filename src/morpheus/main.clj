@@ -13,34 +13,38 @@
    [clojure.string      :as str]
    [clojure.core.async  :as async]
    [clojure.java.shell  :as shell]
+   [clojure.tools.cli   :refer [parse-opts]]
    [morpheus.executor.engine  :as engine]
    [morpheus.executor.wiggum  :as wiggum]
    [morpheus.executor.store   :as store]
    [morpheus.slug             :as slug]
-   [morpheus.system           :as sys])
+   [morpheus.system           :as sys]
+   [taoensso.timbre      :as log])
   (:gen-class))
 
+(def cli-options
+  [["-p" "--project-dir PATH"        "Project directory for Claude Code"]
+   [nil  "--step"                    "Step mode: pause after each iteration"]
+   [nil  "--max-iterations N"       "Maximum iterations" :parse-fn parse-long]
+   [nil  "--view"                    "View only: show saved UI state"]
+   [nil  "--fresh"                   "Fresh run: remove cached work-dir"]
+   [nil  "--polish"                  "Polish pass: back-fill WHY comments"]
+   [nil  "--polish-only"             "Polish only: run standalone polish pass"]
+   [nil  "--model MODEL"             "Model for both supervisor and executor (overrides EDN)"]
+   [nil  "--supervisor-model MODEL"  "Model for supervisor (overrides EDN)"]
+   [nil  "--executor-model MODEL"    "Model for executor (overrides EDN)"]
+   ["-h" "--help"]])
+
 (defn- parse-args [args]
-  (loop [remaining (seq args) acc {}]
-    (if (empty? remaining)
-      acc
-      (condp = (first remaining)
-        "--project-dir"    (recur (drop 2 remaining)
-                                  (assoc acc :project-dir (second remaining)))
-        "--step"           (recur (rest remaining)
-                                  (assoc acc :step-once? true))
-        "--max-iterations" (recur (drop 2 remaining)
-                                  (assoc acc :max-iterations
-                                         (parse-long (second remaining))))
-        "--view"           (recur (rest remaining)
-                                  (assoc acc :view-only? true))
-        "--fresh"          (recur (rest remaining)
-                                  (assoc acc :fresh? true))
-        "--polish"         (recur (rest remaining)
-                                  (assoc acc :polish-pass? true))
-        "--polish-only"    (recur (rest remaining)
-                                  (assoc acc :polish-only? true))
-        (recur (rest remaining) (assoc acc :edn-file (first remaining)))))))
+  (let [{:keys [options arguments errors summary]}
+        (parse-opts args cli-options)]
+    (when errors
+      (doseq [e errors]
+        (println e))
+      (println summary)
+      (System/exit 1))
+    (cond-> options
+      (first arguments) (assoc :edn-file (first arguments)))))
 
 (defn- detect-type [cfg]
   (cond
@@ -90,19 +94,11 @@
                         " (" (name (:type v)) ") - " (:reason v))))))
 
     :run-paused
-    (do
-      (println (str "\nPaused after iteration " (:iteration event)
-                    (cond
-                      (:review-pause? event) "  judge requested review"
-                      (:verified? event)     "  verified"
-                      :else                  "  not verified")))
-      (when-let [r (:review event)]
-        (println (str "  judge: score=" (:score r)
-                      "  rec="  (name (:recommendation r))
-                      (when-let [s (:summary r)] (str " - " s))))
-        (doseq [v (:violations r)]
-          (println (str "    [" (name (:severity v)) "] " (:file v)
-                        " (" (name (:type v)) ") - " (:reason v))))))
+    (println (str "\nPaused after iteration " (:iteration event)
+                  (cond
+                    (:review-pause? event) "  judge requested review"
+                    (:verified? event)     "  verified"
+                    :else                  "  not verified")))
 
     :provider-fallback
     (println (str "Rate limit - retrying with " (:fallback event)
@@ -235,12 +231,61 @@
     (do (println (str "No snapshot found for " project-dir))
         (System/exit 1))))
 
+(defn- parse-model-string
+  [s]
+  (if (and s (str/includes? s "/"))
+    (let [[provider model-id] (str/split s #"/")]
+      {:provider (keyword (str/lower-case provider))
+       :model-id model-id})
+    (when s (log/debug "No override for provider and model" s))))
+
+(defn- apply-model-overrides
+  [cfg {:keys [model supervisor-model executor-model]}]
+  (let [[model supervisor-model executor-model] 
+        (map parse-model-string [model supervisor-model executor-model])] 
+  (cond-> cfg
+      model
+      (assoc :supervisor-model-config model 
+             :executor-model-config   model)
+      supervisor-model
+      (assoc :supervisor-model-config supervisor-model)
+      executor-model
+      (assoc :executor-model-config executor-model))))
+
+(defn print-help
+  [cmd]
+  (println (str "Usage: " cmd " <graph.edn> [--options]"))
+        (println "")
+        (println "Options:")
+            (println "  -p, --project-dir PATH        Project directory for Claude Code")
+            (println "  -s, --step                    Step mode: pause after each iteration")
+            (println "  -i, --max-iterations N        Maximum iterations")
+            (println "  -v, --view                    View only: show saved UI state")
+            (println "  -f, --fresh                   Fresh run: remove cached work-dir")
+            (println "  -o, --polish                  Polish pass: back-fill WHY comments")
+            (println "  -P, --polish-only              Polish only: run standalone polish pass")
+            (println "      --model MODEL              Model for both supervisor and executor as minimax/MiniMax-M2.7 for example")
+            (println "      --supervisor-model MODEL  Model for supervisor only as claude/claude-haiku-4-5-20251001 for example")
+            (println "      --executor-model MODEL    Model for executor only as kimi/kimi-k2.5 for example")
+            (println "  -h, --help                    Show this help")
+        (println "")
+        (println "Examples:")
+        (println (str "  " cmd " graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react"))
+        (println (str "  " cmd " graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step"))
+        (println (str "  " cmd " --view --project-dir /tmp/todo-react"))
+        (println (str "  " cmd " --polish-only --project-dir /tmp/todo-react")))
+
 (defn -main [& args]
-  (let [{:keys [edn-file project-dir step-once? max-iterations
-                view-only? fresh? polish-pass? polish-only?]
+  (let [{:keys [edn-file project-dir step max-iterations
+                view fresh polish polish-only help]
          :as   opts} (parse-args args)]
 
-    (when polish-only?
+    (when help
+      (let [cmd (invocation)]
+        (print-help cmd))
+      (System/exit 0))
+
+    (when polish-only
       (when-not project-dir
         (println "--polish-only requires --project-dir")
         (System/exit 1))
@@ -248,20 +293,12 @@
       (shutdown-agents)
       (System/exit 0))
 
-    (when-not (or edn-file (and view-only? project-dir))
+    (when-not (or edn-file (and view project-dir))
       (let [cmd (invocation)]
-        (println (str "Usage: " cmd " <graph.edn> [--project-dir <path>] [--step] [--max-iterations <n>] [--fresh] [--polish]"))
-        (println (str "       " cmd " --view --project-dir <path>"))
-        (println (str "       " cmd " --polish-only --project-dir <path>"))
-        (println)
-        (println "Examples:")
-        (println (str "  " cmd " graphs/examples/todo-app-wiggum.edn --project-dir /tmp/todo-react"))
-        (println (str "  " cmd " graphs/examples/todo-app-dag.edn    --project-dir /tmp/todo-clj --step"))
-        (println (str "  " cmd " --view --project-dir /tmp/todo-react"))
-        (println (str "  " cmd " --polish-only --project-dir /tmp/todo-react")))
+       (print-help cmd))
       (System/exit 1))
 
-    (when view-only?
+    (when view
       (sys/start!)
       (let [run-store (get-in @sys/system [:run-store])
             port      (or (some-> (System/getenv "PORT") parse-long) 7777)
@@ -276,7 +313,8 @@
               (System/exit 1)))))
 
     (let [raw   (edn/read-string (slurp edn-file))
-          rtype (detect-type raw)]
+          rtype (detect-type raw)
+          cfg   (apply-model-overrides raw opts)]
 
       ;; Stash the spec path so print-event's :run-error hint can echo a
       ;; ready-to-paste resume command.
@@ -284,7 +322,7 @@
 
       (println (str "Loading " edn-file " [" (name rtype) "]"))
 
-      (when (and fresh? project-dir)
+      (when (and fresh project-dir)
         (when-let [s (slug/project-slug project-dir)]
           (let [wd (str (System/getProperty "user.home") "/.morpheus/runs/" s)]
             (when (.exists (java.io.File. wd))
@@ -302,18 +340,18 @@
             run       (case rtype
                         :wiggum
                         (wiggum/execute! run-id
-                          (cond-> raw
+                          (cond-> cfg
                             project-dir    (assoc :project-dir project-dir)
-                            step-once?     (assoc :step-once? true)
+                            step           (assoc :step-once? true)
                             max-iterations (assoc :max-iterations max-iterations)
-                            polish-pass?   (assoc :polish-pass? true)))
+                            polish         (assoc :polish-pass? true)))
 
                         :dag
-                        (engine/execute! run-id raw
+                        (engine/execute! run-id cfg
                           (cond-> {}
                             project-dir
                             (assoc :graph/params
-                                   (assoc (:graph/params raw {}) :project-dir project-dir)))))
+                                   (assoc (:graph/params cfg {}) :project-dir project-dir)))))
 
             _         (store/add-run! run-store run)
             _         (println (str "UI: http://localhost:" port "/runs/" run-id))
