@@ -7,8 +7,10 @@
    [clojure.string              :as str]
    [taoensso.timbre             :as log]
    [org.httpkit.client          :as http]
-   [morpheus.executor.claude-code :as cc]
+   [morpheus.executor.agent       :as agent]
+   [morpheus.executor.claude-code-agent :as cc]
    [morpheus.executor.llm       :as llm]
+   [morpheus.executor.pi-agent  :as pi]
    [morpheus.graph.context      :as ctx]
    [morpheus.graph.topo         :as topo]))
 
@@ -19,62 +21,137 @@
    (graph-expand) and may put events on event-ch."
   (fn [node _inputs _context _graph-atom _event-ch] (:type node)))
 
+(defn- model-config
+  "Coalesce model-config from node. Prefers explicit :model-config,
+   falls back to :model if it's a map, returns {} otherwise."
+  [node]
+  (or (:model-config node)
+      (when (map? (:model node)) (:model node))
+      {}))
+
+(defn- agent-from-model
+  "Returns :pi or :claude based on the coalesced model-config."
+  [node]
+  (or (:agent (model-config node)) :claude))
+
+(defn- run-task-with-pi!
+  "Full subprocess run for :executor :pi or auto-detected :agent :pi."
+  [node inputs context event-ch]
+  (let [run-id    (str (System/currentTimeMillis))
+        work-dir  (agent/make-work-dir! "morpheus-pi-" run-id (:id node))
+        claude-md (cc/render-claude-md node inputs context)
+        _         (agent/write-claude-md! work-dir claude-md)
+        prompt    (ctx/render-prompt (:prompt node) inputs)
+        result    (pi/run! {:work-dir     work-dir
+                            :prompt       prompt
+                            :project-dir  (:project-dir node)
+                            :timeout-ms   (:timeout-ms node 300000)
+                            :model-config (model-config node)
+                            :on-output    (fn [line]
+                                            (when-let [bufs (::output-buffers context)]
+                                              (swap! bufs update (:id node) str line "\n"))
+                                            (async/put! event-ch
+                                              {:type    :node-output-line
+                                               :node-id (:id node)
+                                               :line    line}))})]
+    (when (pos? (:exit result))
+      (log/warn "Pi non-zero exit" {:node (:id node) :exit (:exit result)}))
+    (async/put! event-ch {:type     :files-written
+                          :node-id  (:id node)
+                          :files    (:files-written result)
+                          :work-dir (:work-dir result)})
+    (async/put! event-ch {:type    :node-output
+                          :node-id (:id node)
+                          :stdout  (:stdout result)
+                          :exit    (:exit result)})
+    {:output        (:stdout result)
+     :files-written (:files-written result)
+     :work-dir      (:work-dir result)
+     :exit          (:exit result)}))
+
+(defn- run-task-with-claude!
+  "Full subprocess run for :executor :claude or default."
+  [node inputs context event-ch]
+  (let [run-id    (str (System/currentTimeMillis))
+        work-dir  (agent/make-work-dir! "morpheus-" run-id (:id node))
+        claude-md (cc/render-claude-md node inputs context)
+        _         (agent/write-claude-md! work-dir claude-md)
+        prompt    (ctx/render-prompt (:prompt node) inputs)
+        result    (cc/run! {:work-dir     work-dir
+                            :prompt       prompt
+                            :project-dir  (:project-dir node)
+                            :timeout-ms   (:timeout-ms node 300000)
+                            :model        (:model node)
+                            :model-config (:model-config node)
+                            :auto?        (get node :auto? true)
+                            :on-output    (fn [line]
+                                            (when-let [bufs (::output-buffers context)]
+                                              (swap! bufs update (:id node) str line "\n"))
+                                            (async/put! event-ch
+                                              {:type    :node-output-line
+                                               :node-id (:id node)
+                                               :line    line}))})]
+    (when (pos? (:exit result))
+      (log/warn "Claude Code non-zero exit" {:node (:id node) :exit (:exit result)}))
+    (async/put! event-ch {:type     :files-written
+                          :node-id  (:id node)
+                          :files    (:files-written result)
+                          :work-dir (:work-dir result)})
+    (async/put! event-ch {:type    :node-output
+                          :node-id (:id node)
+                          :stdout  (:stdout result)
+                          :exit    (:exit result)})
+    {:output        (:stdout result)
+     :files-written (:files-written result)
+     :work-dir      (:work-dir result)
+     :exit          (:exit result)}))
+
 (defmethod execute-node! :task
   [node inputs context _graph-atom event-ch]
   (log/info "Task node" (:id node) "executor:" (or (:executor node) :claude-code))
-  (if (= :llm (:executor node))
-    (llm/complete (or (:model node) {})
-                  (ctx/render-prompt (:prompt node) inputs))
-    (let [run-id    (str (System/currentTimeMillis))
-          work-dir  (cc/make-work-dir! run-id (:id node))
-          claude-md (cc/render-claude-md node inputs context)
-          _         (cc/write-claude-md! work-dir claude-md)
-          prompt    (ctx/render-prompt (:prompt node) inputs)
-          result    (cc/run! {:work-dir     work-dir
-                              :prompt       prompt
-                              :project-dir  (:project-dir node)
-                              :timeout-ms   (:timeout-ms node 300000)
-                              :model        (:model node)
-                              :model-config (:model-config node)
-                              :auto?        (get node :auto? true)
-                              :on-output   (fn [line]
-                                             (when-let [bufs (::output-buffers context)]
-                                               (swap! bufs update (:id node) str line "\n"))
-                                             (async/put! event-ch
-                                               {:type    :node-output-line
-                                                :node-id (:id node)
-                                                :line    line}))})]
-      (when (pos? (:exit result))
-        (log/warn "Claude Code non-zero exit" {:node (:id node) :exit (:exit result)}))
-      (async/put! event-ch {:type     :files-written
-                            :node-id  (:id node)
-                            :files    (:files-written result)
-                            :work-dir (:work-dir result)})
-      (async/put! event-ch {:type    :node-output
-                            :node-id (:id node)
-                            :stdout  (:stdout result)
-                            :exit    (:exit result)})
-      {:output        (:stdout result)
-       :files-written (:files-written result)
-       :work-dir      (:work-dir result)
-       :exit          (:exit result)})))
+  (case (:executor node)
+    ;; Lightweight — no work dir, no file tools, just prompt/response.
+    ;; llm/complete is a multimethod on :agent, so :agent :claude or :pi both work.
+    :llm (llm/complete (model-config node)
+                       (ctx/render-prompt (:prompt node) inputs))
+
+    ;; Explicit full-agent executors.
+    :pi     (run-task-with-pi!     node inputs context event-ch)
+    :claude (run-task-with-claude! node inputs context event-ch)
+
+    ;; Default: auto-detect agent from model-config.
+    (if (= :pi (agent-from-model node))
+      (run-task-with-pi! node inputs context event-ch)
+      (run-task-with-claude! node inputs context event-ch))))
+
+(defn- run-planning-with-pi!
+  [work-dir prompt project-dir timeout-ms]
+  (pi/run-plan! {:work-dir work-dir :prompt prompt
+                 :project-dir project-dir :timeout-ms timeout-ms}))
+
+(defn- run-planning-with-claude!
+  [work-dir prompt project-dir timeout-ms]
+  (cc/run-plan! {:work-dir work-dir :prompt prompt
+                 :project-dir project-dir :timeout-ms timeout-ms}))
 
 (defmethod execute-node! :planning
   [node inputs context _graph-atom _event-ch]
-  (log/info "Planning node" (:id node))
+  (log/info "Planning node" (:id node) "executor:" (or (:executor node) :claude-code))
   (let [node-ids  (map name (:sections node))
         run-id    (str (System/currentTimeMillis))
-        work-dir  (cc/make-work-dir! run-id (:id node))
+        work-dir  (agent/make-work-dir! "morpheus-" run-id (:id node))
         claude-md (cc/render-claude-md node inputs context)
-        _         (cc/write-claude-md! work-dir claude-md)
+        _         (agent/write-claude-md! work-dir claude-md)
         prompt    (str (ctx/render-prompt (:prompt node) inputs)
                        "\n\nProduce a section for EACH of these node IDs:\n"
                        (str/join "\n" (map #(str "## node:" %) node-ids))
                        "\n\nUse exactly that heading format for each section.")
-        result    (cc/run-plan! {:work-dir    work-dir
-                                 :prompt      prompt
-                                 :project-dir (:project-dir node)
-                                 :timeout-ms  (:timeout-ms node 180000)})
+        result    (case (:executor node)
+                    :pi     (run-planning-with-pi!     work-dir prompt (:project-dir node) (:timeout-ms node 180000))
+                    :claude (run-planning-with-claude! work-dir prompt (:project-dir node) (:timeout-ms node 180000))
+                    (if (= :pi (agent-from-model node))
+                      (run-planning-with-pi!     work-dir prompt (:project-dir node) (:timeout-ms node 180000))
+                      (run-planning-with-claude! work-dir prompt (:project-dir node) (:timeout-ms node 180000))))
         raw       (:stdout result)
         sections  (reduce
                     (fn [m section-id]
@@ -100,14 +177,34 @@
                     (fn [branch]
                       (let [branch-inputs (ctx/resolve-inputs (:inputs branch {}) context)
                             merged        (merge inputs branch-inputs)
-                            work-dir      (cc/make-work-dir! run-id (:id branch))
+                            work-dir      (agent/make-work-dir! "morpheus-" run-id (:id branch))
                             claude-md     (cc/render-claude-md branch merged context)
-                            _             (cc/write-claude-md! work-dir claude-md)
+                            _             (agent/write-claude-md! work-dir claude-md)
                             prompt        (ctx/render-prompt (:prompt branch) merged)
-                            result        (cc/run! {:work-dir    work-dir
-                                                    :prompt      prompt
-                                                    :project-dir (:project-dir branch)
-                                                    :timeout-ms  (:timeout-ms node 300000)})]
+                            result        (case (:executor branch)
+                                            :pi     (pi/run! {:work-dir     work-dir
+                                                              :prompt       prompt
+                                                              :project-dir  (:project-dir branch)
+                                                              :timeout-ms   (:timeout-ms node 300000)
+                                                              :model-config (or (:model-config branch)
+                                                                                (when (map? (:model branch)) (:model branch))
+                                                                                {})})
+                                            :claude (cc/run! {:work-dir    work-dir
+                                                              :prompt      prompt
+                                                              :project-dir (:project-dir branch)
+                                                              :timeout-ms  (:timeout-ms node 300000)})
+                                            (if (= :pi (agent-from-model branch))
+                                              (pi/run! {:work-dir     work-dir
+                                                        :prompt       prompt
+                                                        :project-dir  (:project-dir branch)
+                                                        :timeout-ms   (:timeout-ms node 300000)
+                                                        :model-config (or (:model-config branch)
+                                                                          (when (map? (:model branch)) (:model branch))
+                                                                          {})})
+                                              (cc/run! {:work-dir    work-dir
+                                                        :prompt      prompt
+                                                        :project-dir (:project-dir branch)
+                                                        :timeout-ms  (:timeout-ms node 300000)})))]
                         (async/put! event-ch {:type    :branch-complete
                                               :node-id (:id node)
                                               :branch  (:id branch)

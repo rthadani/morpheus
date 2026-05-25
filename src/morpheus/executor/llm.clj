@@ -1,16 +1,16 @@
 (ns morpheus.executor.llm
-  "LLM calls — dispatches on :provider in model-config. All providers shell out
-   to the claude CLI; non-Anthropic providers just override env vars to point
-   at an Anthropic-compatible endpoint.
-     :claude  (default) — api.anthropic.com
-     :ollama            — `ollama launch claude` (auto-pulls model)
-     :kimi              — api.moonshot.ai/anthropic (reads MOONSHOT_API_KEY)
-     :minimax           — api.minimax.chat/anthropic (reads MINIMAX_API_KEY)"
+  "LLM calls — dispatches on :agent in model-config.
+     :claude (default) — shells out to the claude CLI; :provider inside
+                         routes to :ollama, :kimi, :minimax, or Anthropic.
+     :pi               — shells out to the pi CLI; :provider inside
+                         routes to whatever pi supports (google, openai, …)."
   (:require
-   [clojure.data.json   :as json]
-   [clojure.java.shell  :as shell]
-   [clojure.string      :as str]
-   [taoensso.timbre     :as log]))
+   [clojure.data.json           :as json]
+   [clojure.java.shell          :as shell]
+   [clojure.string              :as str]
+   [taoensso.timbre             :as log]
+   [morpheus.executor.agent     :as agent]
+   [morpheus.executor.pi-agent  :as pi]))
 
 (def default-model "claude-haiku-4-5-20251001")
 
@@ -122,7 +122,9 @@
         (throw-cli-error! "claude CLI error (minimax)" result))
       (str/trim (:out result)))))
 
-(defn- complete-claude
+(defn- complete-anthropic
+  "Default :claude-agent provider — calls the claude CLI targeting
+   api.anthropic.com directly (no env overrides)."
   [{:keys [model-id system]
     :or   {model-id default-model}}
    prompt]
@@ -136,25 +138,28 @@
       (throw-cli-error! "claude CLI error" result))
     (str/trim (:out result))))
 
-(defn complete
-  "Calls claude --print, optionally routed through a non-Anthropic backend.
-   Dispatches on :provider — :ollama, :kimi, :minimax, or :claude (default)."
-  [{:keys [provider model-id] :as model-config} prompt]
-  (log/debug "LLM call" {:provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
-  (case provider
-    :ollama  (complete-ollama  model-config prompt)
-    :kimi    (complete-kimi    model-config prompt)
-    :minimax (complete-minimax model-config prompt)
-    (complete-claude model-config prompt)))
+(defmulti complete
+  "Dispatches on :agent — :claude (default) or :pi.
+   The :claude agent shells out to the claude CLI and routes to its own
+   providers (:ollama, :kimi, :minimax, or default Anthropic).
+   The :pi agent shells out to the pi CLI and routes to whatever provider
+   pi is configured for (:google, :openai, :anthropic, …)."
+  (fn [model-config _prompt]
+    (or (:agent model-config) :claude)))
 
-(defn- extract-json-object
-  "Pulls the outermost { ... } from text — robust to prose or fences around it."
-  [text]
-  (let [start (.indexOf text "{")
-        end   (.lastIndexOf text "}")]
-    (if (and (>= start 0) (> end start))
-      (subs text start (inc end))
-      text)))
+(defmethod complete :claude
+  [{:keys [provider model-id] :as model-config} prompt]
+  (log/debug "LLM call" {:agent :claude :provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
+  (case provider
+    :ollama  (complete-ollama   model-config prompt)
+    :kimi    (complete-kimi     model-config prompt)
+    :minimax (complete-minimax  model-config prompt)
+    (complete-anthropic model-config prompt)))
+
+(defmethod complete :pi
+  [{:keys [model-id] :as model-config} prompt]
+  (log/debug "LLM call" {:agent :pi :model model-id :prompt-chars (count prompt)})
+  (pi/complete model-config prompt))
 
 (defn complete-json
   "Like complete but extracts a JSON object from the response and parses it."
@@ -165,11 +170,11 @@
                         (str/replace #"(?s)```[a-z]*\n?" "")
                         (str/replace #"```" "")
                         str/trim
-                        extract-json-object)]
+                        agent/extract-json-object)]
     (log/debug "complete-json raw response" {:chars (count raw) :first-50 (subs raw 0 (min 50 (count raw)))})
     (try
       (json/read-str json-str :key-fn keyword)
       (catch Exception e
         (log/error "JSON parse failed" {:raw raw})
-        (throw (ex-info (str "Supervisor returned non-JSON: " (subs raw 0 (min 200 (count raw))))
+        (throw (ex-info (str "LLM returned non-JSON: " (subs raw 0 (min 200 (count raw))))
                         {:raw raw :cause e}))))))

@@ -1,4 +1,4 @@
-(ns morpheus.executor.claude-code
+(ns morpheus.executor.claude-code-agent
   "Runs Claude Code as a subprocess for task and planning nodes. CC handles
    file I/O, bash, and codebase context — the orchestrator just hands it a
    working directory and a CLAUDE.md."
@@ -8,42 +8,8 @@
    [clojure.java.io     :as io]
    [clojure.string      :as str]
    [clojure.data.json   :as json]
-   [taoensso.timbre     :as log])
-  (:import
-   [java.nio.file Files Path]
-   [java.nio.file.attribute FileAttribute]
-   [java.io BufferedReader InputStreamReader]))
-
-(defn make-work-dir!
-  "Creates a temp directory for a node's CC session. Returns absolute path."
-  [run-id node-id]
-  (let [prefix (str "morpheus-" (str run-id) "-" (name node-id) "-")
-        path   (Files/createTempDirectory prefix (make-array FileAttribute 0))]
-    (str path)))
-
-(defn list-written-files [dir]
-  (->> (file-seq (io/file dir))
-       (filter #(.isFile %))
-       (map #(.getPath %))
-       (remove #(str/includes? % "CLAUDE.md"))
-       (remove #(str/includes? % "/."))
-       (map #(str/replace % (str dir "/") ""))))
-
-(defn snapshot-files
-  "Returns {relative-path -> last-modified-ms} for non-hidden, non-CLAUDE.md
-   files. Used by evidence/classify-changes to distinguish new vs edited."
-  [dir]
-  (let [base (io/file dir)]
-    (->> (file-seq base)
-         (filter #(.isFile %))
-         (remove #(str/includes? (.getPath %) "/."))
-         (remove #(str/includes? (.getName %) "CLAUDE.md"))
-         (into {} (map (fn [f]
-                         [(str/replace (.getPath f) (str dir "/") "")
-                          (.lastModified f)]))))))
-
-(defn write-claude-md! [work-dir content]
-  (spit (str work-dir "/CLAUDE.md") content))
+   [taoensso.timbre     :as log]
+   [morpheus.executor.agent :as agent]))
 
 (defn render-claude-md
   "Builds the CLAUDE.md for a node. :claude-md may be a string (with {{slot}}
@@ -78,7 +44,7 @@
       (str rendered "\n\n## Human guidance\n\n" steer "\n")
       rendered)))
 
-(defn parse-stream-line
+(defn- parse-stream-line
   "Parses one stream-json line. Returns {:activity :result :cost-usd} —
    :result and :cost-usd only present on the final result line."
   [line]
@@ -159,80 +125,46 @@
                                         :provider (or (:provider model-config) :claude)
                                         :model    model
                                         :prompt-chars (count prompt)})
-  (let [_ (when project-dir
-            (shell/sh "sh" "-c"
-                      (str "cp -r " project-dir "/* " work-dir "/")
-                      :dir work-dir))
-        before-snapshot (snapshot-files work-dir)
+  (let [before-snapshot (agent/snapshot-files work-dir)
         started-at      (System/currentTimeMillis)
         provider        (or (:provider model-config) :claude)
         {:keys [cmd env-overrides]} (build-cmd+env model-config model auto? prompt)
-        ;; stdbuf forces line-buffered stdout so we get real-time output via pipe
-        stdbuf?         (zero? (:exit (shell/sh "which" "stdbuf")))
-        cmd             (if stdbuf?
-                          (vec (concat ["stdbuf" "-oL" "-eL"] cmd))
-                          cmd)
-        pb              (doto (ProcessBuilder. cmd)
-                          (.directory (io/file work-dir))
-                          (.redirectErrorStream false))
-        _               (.putAll (.environment pb) (System/getenv))
-        _               (when (seq env-overrides)
-                          (.putAll (.environment pb) env-overrides))
-        process         (.start pb)
-        stdout-buf      (StringBuilder.)
-        stderr-buf      (StringBuilder.)
-        ;; drain stderr on a separate thread to avoid blocking
-        stderr-thread   (doto (Thread.
-                                (fn []
-                                  (with-open [rdr (BufferedReader.
-                                                    (InputStreamReader.
-                                                      (.getErrorStream process)))]
-                                    (loop [line (.readLine rdr)]
-                                      (when line
-                                        (.append stderr-buf line)
-                                        (.append stderr-buf "\n")
-                                        (recur (.readLine rdr)))))))
-                          (.setDaemon true)
-                          .start)]
-    (let [[result-text cost-usd]
-          (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
-            (loop [line (.readLine rdr) result nil cost nil]
-              (if-not line
-                [result cost]
-                (let [parsed (parse-stream-line line)]
-                  (.append stdout-buf line)
-                  (.append stdout-buf "\n")
-                  (when (and on-output (:activity parsed))
-                    (on-output (:activity parsed)))
-                  (recur (.readLine rdr)
-                         (or (:result parsed) result)
-                         (or (:cost-usd parsed) cost))))))]
-      (.join stderr-thread)
-      (let [exited?   (.waitFor process (quot timeout-ms 1000) java.util.concurrent.TimeUnit/SECONDS)
-            _         (when-not exited? (.destroyForcibly process))
-            exit-code (if exited? (.exitValue process) 1)
-            stdout    (or result-text (str stdout-buf))
-            stderr    (str stderr-buf)
-            duration-ms (- (System/currentTimeMillis) started-at)
-            after-snapshot (snapshot-files work-dir)]
-        (log/info "Claude Code run complete"
-                  {:exit exit-code :out-chars (count stdout) :duration-ms duration-ms
-                   :cost-usd cost-usd})
-        (when (not (str/blank? stderr))
-          (log/warn "Claude Code stderr" stderr))
-        {:stdout          stdout
-         :stderr          stderr
-         :exit            exit-code
-         :files-written   (list-written-files work-dir)
-         :before-snapshot before-snapshot
-         :after-snapshot  after-snapshot
-         :started-at      started-at
-         :duration-ms     duration-ms
-         :prompt-chars    (count prompt)
-         :cost-usd        cost-usd
-         :model           model
-         :provider        (name provider)
-         :work-dir        work-dir}))))
+        result-text     (atom nil)
+        cost-usd        (atom nil)
+        on-line         (fn [line]
+                          (let [parsed (parse-stream-line line)]
+                            (when (and on-output (:activity parsed))
+                              (on-output (:activity parsed)))
+                            (when (:result parsed)
+                              (reset! result-text (:result parsed)))
+                            (when (:cost-usd parsed)
+                              (reset! cost-usd (:cost-usd parsed)))))
+        sub             (agent/run-subprocess!
+                          {:work-dir      work-dir
+                           :project-dir   project-dir
+                           :timeout-ms    timeout-ms
+                           :cmd           cmd
+                           :env-overrides env-overrides
+                           :on-line       on-line})
+        after-snapshot  (agent/snapshot-files work-dir)]
+    (log/info "Claude Code run complete"
+              {:exit (:exit sub) :out-chars (count (:stdout-buf sub))
+               :duration-ms (:duration-ms sub) :cost-usd @cost-usd})
+    (when (not (str/blank? (:stderr-buf sub)))
+      (log/warn "Claude Code stderr" (:stderr-buf sub)))
+    (agent/build-result
+      {:work-dir        work-dir
+       :stdout          (:stdout-buf sub)
+       :stderr          (:stderr-buf sub)
+       :exit            (:exit sub)
+       :duration-ms     (:duration-ms sub)
+       :prompt-chars    (count prompt)
+       :result-text     @result-text
+       :cost-usd        @cost-usd
+       :model           model
+       :provider        (name provider)
+       :before-snapshot before-snapshot
+       :after-snapshot  after-snapshot})))
 
 (defn run-plan!
   "Plan-mode: analyses the codebase and returns a structured plan without

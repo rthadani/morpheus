@@ -1,7 +1,7 @@
 (ns morpheus.executor.evidence
   "Pure functions for building and analysing iteration evidence — the
    deterministic record of what happened in one Wiggum iteration. File
-   snapshots are captured in claude-code/run! and passed in."
+   snapshots are captured in claude-code-agent/run! and passed in."
   (:require [clojure.set    :as set]
             [clojure.string :as str]))
 
@@ -34,7 +34,7 @@
 
 (defn build
   "Constructs the evidence map for one iteration. cc-result is the enriched
-   map from claude-code/run! (snapshots, exit, model, etc.)."
+   map from claude-code-agent/run! (snapshots, exit, model, etc.)."
   [iteration cc-result verification & [top-level dir-tree expected-check]]
   (let [before  (:before-snapshot cc-result {})
         after   (:after-snapshot  cc-result {})
