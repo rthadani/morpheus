@@ -18,7 +18,7 @@
 
 (defn make-work-dir!
   "Creates a temp directory for a node's session. Returns absolute path.
-   Prefix should be a short slug like 'morpheus-' or 'morpheus-pi-'."
+   Prefix should be a short slug like 'morpheus-'."
   [prefix run-id node-id]
   (let [full-prefix (str prefix (str run-id) "-" (name node-id) "-")
         path (Files/createTempDirectory full-prefix (make-array FileAttribute 0))]
@@ -47,6 +47,20 @@
 
 (defn write-claude-md! [work-dir content]
   (spit (str work-dir "/CLAUDE.md") content))
+
+(defn seed-project!
+  "Copies project-dir's contents into work-dir before a run. No-op when nil."
+  [project-dir work-dir]
+  (when project-dir
+    (shell/sh "sh" "-c"
+              (str "cp -r " project-dir "/* " work-dir "/")
+              :dir work-dir)))
+
+(def planning-suffix
+  "Appended to a planning prompt so the agent analyses without writing files."
+  (str "\n\nIMPORTANT: This is a planning pass. "
+       "Analyse the codebase and produce a detailed plan. "
+       "Do NOT write or modify any files."))
 
 ;; ---------------------------------------------------------------------------
 ;; Rate-limit / error handling
@@ -162,10 +176,7 @@
   [{:keys [work-dir prompt timeout-ms project-dir
            cmd env-overrides on-line]
     :or   {timeout-ms 300000}}]
-  (when project-dir
-    (shell/sh "sh" "-c"
-              (str "cp -r " project-dir "/* " work-dir "/")
-              :dir work-dir))
+  (seed-project! project-dir work-dir)
   (let [started-at    (System/currentTimeMillis)
         full-cmd      (stdbuf-cmd cmd)
         process       (start-process! work-dir full-cmd env-overrides)

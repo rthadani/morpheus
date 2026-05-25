@@ -172,18 +172,12 @@
   [{:keys [work-dir prompt project-dir timeout-ms]
     :or   {timeout-ms 120000}}]
   (log/info "Claude Code plan mode" {:work-dir work-dir})
-  (let [_ (when project-dir
-            (shell/sh "sh" "-c"
-                      (str "cp -r " project-dir "/* " work-dir "/")
-                      :dir work-dir))
-        result (shell/sh
+  (agent/seed-project! project-dir work-dir)
+  (let [result (shell/sh
                  "claude"
                  "--print"
                  "--dangerously-skip-permissions"
-                 (str prompt
-                      "\n\nIMPORTANT: This is a planning pass. "
-                      "Analyse the codebase and produce a detailed plan. "
-                      "Do NOT write or modify any files.")
+                 (str prompt agent/planning-suffix)
                  :dir work-dir)]
     {:stdout        (:out result)
      :exit          (:exit result)
