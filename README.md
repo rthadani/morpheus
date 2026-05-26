@@ -1,6 +1,21 @@
 # Morpheus
 
-An agent orchestration system where **Claude Code is the executor**. You describe work as data (EDN), Morpheus runs Claude Code subprocesses to do it, and a supervisor steers between iterations based on evidence.
+> Aboard the Nebuchadnezzar, Morpheus reads the screens. The crew below jacks
+> into the Matrix one by one — each given a fragment of the dream to shape,
+> each watched, each pulled out when their slice of the world is done. Between
+> insertions Morpheus studies what came back, adjusts the next briefing, and
+> sends the next operator under. Nothing happens that he didn't dispatch;
+> nothing returns that he doesn't read.
+>
+> Or, if you prefer the older story: Morpheus, son of Hypnos, shaper of
+> dreams. He doesn't appear in your sleep himself — he sends the figures who
+> do, decides what each will say, and listens for the dreamer's reaction
+> before sending the next.
+
+Less poetically: **Morpheus is an agent orchestration system where coding
+agents are the executors.** You describe work as data (EDN); Morpheus
+launches `claude` or `pi` CLI subprocesses to do it; a supervisor LLM reads
+the evidence each one brings back and steers the next iteration.
 
 ## How it works
 
@@ -8,7 +23,7 @@ Morpheus has two execution models:
 
 ### DAG executor
 
-You define a graph of task nodes with explicit dependencies. Morpheus walks the graph topologically, running a scoped Claude Code session per node. Each node gets its own `CLAUDE.md` that constrains what Claude Code is allowed to do.
+You define a graph of task nodes with explicit dependencies. Morpheus walks the graph topologically, running a scoped agent session per node (claude or pi, per the node's `:executor` / `:model-config`). Each node gets its own `CLAUDE.md` that constrains what the agent is allowed to do.
 
 ```
 graphs/examples/todo-app-dag.edn
@@ -19,7 +34,7 @@ Use this when you want full control over decomposition and sequencing.
 
 ### Wiggum loop
 
-You state an objective and a success check (`npm test -- --run`, `clj -M:test`, etc.). The loop runs Claude Code, captures evidence (files written/edited, verification exit code), and passes that to a supervisor LLM that emits a tighter control packet for the next iteration. Repeats until the success check passes or max iterations is reached.
+You state an objective and a success check (`npm test -- --run`, `clj -M:test`, etc.). The loop runs the executor agent (`claude` or `pi`), captures evidence (files written/edited, verification exit code), and passes that to a supervisor LLM that emits a tighter control packet for the next iteration. Repeats until the success check passes or max iterations is reached.
 
 ```
 graphs/examples/todo-app-wiggum.edn          (Clojure + htmx)
@@ -85,7 +100,7 @@ clj -M:nrepl   # nREPL on port 7888
 
 ## The judge and end-of-iteration review
 
-Wiggum runs aren't fully autonomous — at certain points, the loop pauses and waits for you. Three things can trigger a pause:
+Wiggum runs aren't fully autonomous — at certain points, the loop pauses and waits for you (Morpheus pulls the operator out of the Matrix and asks you whether to send them back in). Three things can trigger a pause:
 
 - **Judge pause** — at the end of every phase (an iteration whose `expected_files` are all present), an LLM judge inspects the git diff against the previously-accepted state, scores it 0–10, and emits violations tagged `high` / `medium` / `low`. If any violation meets the configured `:review-threshold` (default `:high`), the run pauses.
 - **Milestone pause** — every `:checkpoint-every` iterations, regardless of the judge.
@@ -261,16 +276,16 @@ executor's `:provider` is reset on rate-limit retry so a fallback id like
 
 ## Node types
 
-| Type           | Executor         | Use for                                    |
-|----------------|------------------|--------------------------------------------|
-| `:task`        | Claude Code CLI  | Any unit of work needing file tools        |
-| `:planning`    | Claude Code CLI  | PRD → milestone sections                  |
-| `:parallel`    | Claude Code CLI  | N concurrent Claude Code sessions          |
-| `:checkpoint`  | none             | Human review gate                          |
-| `:graph-expand`| pure fn          | Splice new nodes into the live graph       |
-| `:subgraph`    | recursive engine | Run a nested graph                         |
-| `:shell`       | sh subprocess    | Run tests, build commands, etc.            |
-| `:http`        | http-kit         | Webhooks, external APIs                    |
+| Type           | Executor              | Use for                                    |
+|----------------|-----------------------|--------------------------------------------|
+| `:task`        | claude or pi CLI      | Any unit of work needing file tools        |
+| `:planning`    | claude or pi CLI      | PRD → milestone sections                  |
+| `:parallel`    | claude or pi CLI      | N concurrent agent sessions                |
+| `:checkpoint`  | none                  | Human review gate                          |
+| `:graph-expand`| pure fn               | Splice new nodes into the live graph       |
+| `:subgraph`    | recursive engine      | Run a nested graph                         |
+| `:shell`       | sh subprocess         | Run tests, build commands, etc.            |
+| `:http`        | http-kit              | Webhooks, external APIs                    |
 
 ## Extending
 
