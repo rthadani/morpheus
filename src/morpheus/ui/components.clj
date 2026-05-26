@@ -429,7 +429,12 @@
         [:span.tok-in  (str "↑" tok-in "t")]
         [:span.tok-out (str "↓" tok-out "t")]])]))
 
-(defn iteration-running-row [run-id iteration]
+(defn agent-label
+  "Display name of the executor agent — 'Pi' for :pi, otherwise 'Claude Code'."
+  [agent]
+  (if (= :pi agent) "Pi" "Claude Code"))
+
+(defn iteration-running-row [run-id iteration agent]
   [:div {:id       "iter-row-running"
          :class    "iter-row iter-row-running"
          :hx-get   (str "/runs/" run-id "/iterations/" iteration)
@@ -440,11 +445,12 @@
     [:span.iter-row-num (str "#" iteration)]
     [:span.iter-badge.badge-running "…"]
     [:span.iter-row-dur "running"]]
-   [:div.iter-row-files [:span.iter-running-label "Claude Code working…"]]])
+   [:div.iter-row-files [:span.iter-running-label (str (agent-label agent) " working…")]]])
 
 (defn iteration-detail
   [{:keys [iteration duration-ms files-written files-edited files-deleted
-           exit-code output verification slop-signals model approx-tokens cost-usd]}]
+           exit-code output verification slop-signals model approx-tokens cost-usd
+           control-packet]}]
   (let [secs    (int (/ (or duration-ms 0) 1000))
         ver-ok? (or (nil? verification) (zero? (:exit verification)))
         tok-in  (get approx-tokens :in 0)
@@ -460,6 +466,27 @@
         [:span.iter-detail-tokens (format "$%.4f" (double cost-usd))]
         (when (pos? (+ tok-in tok-out))
           [:span.iter-detail-tokens (str "~" (+ tok-in tok-out) " tok")]))]
+
+     ;; The packet that drove THIS iteration, first — so review reads "what was
+     ;; asked" before "what was produced". The live column only has the latest.
+     (when control-packet
+       (let [{:keys [objective constraints anti-goals success-check expected-files]} control-packet]
+         [:div.iter-section
+          [:div.iter-section-label "Control packet"]
+          [:div.cp-detail
+           (when (seq objective) [:div.cp-objective objective])
+           (when (seq constraints)
+             [:div.cp-section [:div.cp-label "Constraints"]
+              [:ul.cp-list (for [c constraints] [:li c])]])
+           (when (seq anti-goals)
+             [:div.cp-section [:div.cp-label "Do not"]
+              [:ul.cp-list (for [g anti-goals] [:li g])]])
+           (when (seq expected-files)
+             [:div.cp-section [:div.cp-label "Expected files"]
+              [:ul.cp-list (for [f expected-files] [:li f])]])
+           (when success-check
+             [:div.cp-section [:div.cp-label "Done when"]
+              [:code.cp-check success-check]])]]))
 
      (when (seq files-written)
        [:div.iter-section
@@ -497,13 +524,13 @@
         [:div.iter-section-label "Output"]
         [:pre.iter-output output]])]))
 
-(defn iteration-live-panel [iteration]
+(defn iteration-live-panel [iteration agent]
   [:div#wg-detail.wg-detail-body
    [:div.iter-detail-header
     [:span.iter-detail-title (str "Iteration #" iteration)]
     [:span.iter-badge.badge-running "running…"]]
    [:pre#live-output.iter-output.iter-output-live
-    "Claude Code is working…"]])
+    (str (agent-label agent) " is working…")]])
 
 (defn iteration-detail-placeholder []
   [:div#wg-detail.iter-detail-placeholder
@@ -691,7 +718,7 @@
         [:div.wg-pane-header "Iterations"]
         [:div#iteration-list
          (if (= :running state)
-           (iteration-running-row run-id (inc iteration))
+           (iteration-running-row run-id (inc iteration) (:agent summary))
            [:div#iter-row-running])
          (for [ev (reverse evidence-list)]
            (iteration-row run-id ev))]]

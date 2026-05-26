@@ -106,12 +106,24 @@
 ;; ---------------------------------------------------------------------------
 ;; Streaming run! (mirrors claude-code-agent/run!)
 
+(defn- tool-summary
+  "One-line tool-call label for the stream. Shows a recognisable arg
+   (path/command/…) rather than the full args — a write tool's args carry the
+   whole file."
+  [tool-name args]
+  (let [hint (some #(get args %) [:path :file_path :filePath :command :pattern :url])
+        s    (cond
+               hint       (str hint)
+               (seq args) (let [r (pr-str args)]
+                            (if (> (count r) 80) (str (subs r 0 80) "…") r))
+               :else      "")]
+    (str "🔧 " tool-name (when (seq s) (str " " s)))))
+
 (defn- parse-pi-json-line
-  "Parses one pi --mode json line. Returns a map with keys:
-     :text   — content text delta (for streaming display)
-     :tool   — tool-use description (for activity display)
-     :usage  — final usage/cost map from message_end / turn_end
-     :done?  — true when the turn/agent is finished"
+  "Parses one pi --mode json line into a display/usage map. Any key may be
+   absent: :text (assistant text delta), :thinking (reasoning delta),
+   :tool (tool activity line), :usage (token/cost from message_end / turn_end).
+   Termination is detected separately via agent-end-line?."
   [line]
   (try
     (let [ev (json/read-str line :key-fn keyword)]
@@ -119,33 +131,22 @@
         "message_update"
         (let [ame (:assistantMessageEvent ev)]
           (case (:type ame)
-            "text_delta"   {:text (:delta ame)}
-            "text_start"   {:text ""}
-            "thinking_delta" {:text nil}
-            "tool_use"
-            (let [n   (:name ame)
-                  inp (some-> ame :input pr-str)]
-              {:tool (str "🔧 " n (when inp (str " " inp)))})
+            "text_delta"     {:text (:delta ame)}
+            "thinking_delta" {:thinking (:delta ame)}
             {}))
 
-        "message_end"
+        "tool_execution_start"
+        {:tool (tool-summary (:toolName ev) (:args ev))}
+
+        "tool_execution_end"
+        {:tool (str (if (:isError ev) "✗ " "✓ ") (:toolName ev))}
+
+        ("message_end" "turn_end")
         (let [u (get-in ev [:message :usage])]
           {:usage (when u
                     {:input-tokens  (:input u)
                      :output-tokens (:output u)
-                     :cost-usd      (get-in u [:cost :total])})
-           :done? true})
-
-        "turn_end"
-        (let [u (get-in ev [:message :usage])]
-          {:usage (when u
-                    {:input-tokens  (:input u)
-                     :output-tokens (:output u)
-                     :cost-usd      (get-in u [:cost :total])})
-           :done? true})
-
-        "agent_end"
-        {:done? true}
+                     :cost-usd      (get-in u [:cost :total])})})
 
         {}))
     (catch Exception _ {})))
@@ -156,6 +157,14 @@
   (cond-> ["pi" "-p" "--mode" "json" "--no-context-files"]
     provider (conj "--provider" (name provider))
     model-id (conj "--model" model-id)))
+
+(defn- agent-end-line?
+  "pi's terminal event. Not message_end (fires per message, incl. the echoed
+   prompt) or turn_end (per turn) — only agent_end ends the run."
+  [line]
+  (try
+    (= "agent_end" (:type (json/read-str line :key-fn keyword)))
+    (catch Exception _ false)))
 
 (defn run!
   "Runs pi non-interactively in work-dir, streaming stdout via :on-output.
@@ -176,16 +185,20 @@
                                :model    (:model-id model-config)
                                :prompt-chars (count prompt)})
   (let [before-snapshot (agent/snapshot-files work-dir)
+        ;; "" not nil, so build-result never falls back to the raw JSON stdout
+        ;; when a turn ends with only tool calls and no assistant text.
         result-text     (atom "")
         cost-usd        (atom nil)
         on-line         (fn [line]
                           (let [parsed (parse-pi-json-line line)]
-                            (when (and on-output (:text parsed))
-                              (on-output (:text parsed)))
-                            (when (and on-output (:tool parsed))
-                              (on-output (:tool parsed)))
+                            (when on-output
+                              (when-let [t  (:text parsed)]     (on-output t))
+                              (when-let [th (:thinking parsed)] (on-output th))
+                              (when-let [tl (:tool parsed)]     (on-output (str tl "\n"))))
                             (when (:usage parsed)
                               (reset! cost-usd (get-in parsed [:usage :cost-usd])))
+                            ;; Only assistant text feeds the result; thinking and
+                            ;; tool lines are display-only.
                             (when (:text parsed)
                               (swap! result-text str (:text parsed)))))
         sub             (agent/run-subprocess!
@@ -194,7 +207,10 @@
                            :project-dir project-dir
                            :timeout-ms  timeout-ms
                            :cmd         (build-pi-cmd model-config)
-                           :on-line     on-line})
+                           :on-line     on-line
+                           ;; pi keeps a context-mode daemon alive after the run,
+                           ;; so stdout never hits EOF — stop at agent_end.
+                           :complete?   agent-end-line?})
         after-snapshot  (agent/snapshot-files work-dir)]
     (log/info "Pi run complete"
               {:exit (:exit sub)

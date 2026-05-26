@@ -24,23 +24,35 @@
         path (Files/createTempDirectory full-prefix (make-array FileAttribute 0))]
     (str path)))
 
+(def ^:private ignored-dir-segments
+  "Dependency/build dirs skipped in file snapshots — one npm install otherwise
+   dumps thousands of paths into each iteration's evidence."
+  #{"node_modules" ".git" "dist" "build" "target" ".next" ".nuxt"
+    ".venv" "__pycache__" ".gradle" ".idea" "vendor" "coverage" ".pytest_cache"})
+
+(defn- ignored-path? [path]
+  (boolean (some ignored-dir-segments (str/split path #"/"))))
+
 (defn list-written-files [dir]
   (->> (file-seq (io/file dir))
        (filter #(.isFile %))
        (map #(.getPath %))
        (remove #(str/includes? % "CLAUDE.md"))
        (remove #(str/includes? % "/."))
+       (remove ignored-path?)
        (map #(str/replace % (str dir "/") ""))))
 
 (defn snapshot-files
   "Returns {relative-path -> last-modified-ms} for non-hidden, non-CLAUDE.md
-   files. Used to distinguish new vs edited files after a run."
+   files, excluding heavy/generated dirs. Used to distinguish new vs edited
+   files after a run."
   [dir]
   (let [base (io/file dir)]
     (->> (file-seq base)
          (filter #(.isFile %))
          (remove #(str/includes? (.getPath %) "/."))
          (remove #(str/includes? (.getName %) "CLAUDE.md"))
+         (remove #(ignored-path? (.getPath %)))
          (into {} (map (fn [f]
                          [(str/replace (.getPath f) (str dir "/") "")
                           (.lastModified f)]))))))
@@ -139,6 +151,21 @@
       (.putAll (.environment pb) env-overrides))
     (.start pb)))
 
+(defn descendant-handles
+  "Descendant handles, snapshotted while the process is alive — after it exits
+   its children reparent to init and vanish from .descendants."
+  [^Process process]
+  (vec (iterator-seq (.iterator (.descendants process)))))
+
+(defn destroy-tree!
+  "Kill a process and its captured descendants. pi's context-mode daemon
+   inherits stdout, so killing only the parent leaves the pipe open (reader
+   hangs) and the daemon lingering."
+  [^Process process descendants]
+  (.destroyForcibly process)
+  (doseq [^java.lang.ProcessHandle h descendants]
+    (.destroyForcibly h)))
+
 (defn start-stderr-thread!
   "Starts a daemon thread that drains the process's stderr into a
    StringBuilder. Returns the thread."
@@ -172,9 +199,12 @@
      :timeout-ms    — per-run timeout (default 300000)
      :cmd           — command vector (already built by caller)
      :env-overrides — map of env var overrides (optional)
-     :on-line       — callback fn (fn [line]) for each stdout line"
+     :on-line       — callback fn (fn [line]) for each stdout line
+     :complete?     — optional (fn [line]) -> truthy when the agent is done;
+                      stop then instead of waiting for stdout EOF (which never
+                      comes if the CLI leaves a daemon on the pipe)."
   [{:keys [work-dir prompt timeout-ms project-dir
-           cmd env-overrides on-line]
+           cmd env-overrides on-line complete?]
     :or   {timeout-ms 300000}}]
   (seed-project! project-dir work-dir)
   (let [started-at    (System/currentTimeMillis)
@@ -182,31 +212,50 @@
         process       (start-process! work-dir full-cmd env-overrides)
         stdout-buf    (StringBuilder.)
         stderr-buf    (StringBuilder.)
-        stderr-thread (start-stderr-thread! process stderr-buf)]
-    ;; Write prompt to stdin if provided, then close it so the process
-    ;; knows input is finished.
+        stderr-thread (start-stderr-thread! process stderr-buf)
+        done?         (atom false)
+        ;; Capture pi's daemon children while it's alive; after agent_end it
+        ;; self-exits and orphans them to init where we can't find them.
+        daemons       (atom nil)
+        reader        (future
+                        (with-open [rdr (BufferedReader.
+                                          (InputStreamReader. (.getInputStream process)))]
+                          (loop [line (.readLine rdr)]
+                            (when line
+                              (.append stdout-buf line)
+                              (.append stdout-buf "\n")
+                              (when on-line (on-line line))
+                              (when (and complete? (complete? line))
+                                (reset! daemons (descendant-handles process))
+                                (reset! done? true))
+                              (when-not @done?
+                                (recur (.readLine rdr)))))))]
+    ;; Send the prompt, then close stdin so the process sees EOF.
     (when (seq prompt)
       (with-open [w (OutputStreamWriter. (.getOutputStream process))]
         (.write w ^String prompt)
         (.flush w)))
-    (with-open [rdr (BufferedReader. (InputStreamReader. (.getInputStream process)))]
-      (loop [line (.readLine rdr)]
-        (when line
-          (.append stdout-buf line)
-          (.append stdout-buf "\n")
-          (when on-line
-            (on-line line))
-          (recur (.readLine rdr)))))
-    (.join stderr-thread)
-    (let [exited?   (.waitFor process (quot timeout-ms 1000)
-                              java.util.concurrent.TimeUnit/SECONDS)
-          _         (when-not exited? (.destroyForcibly process))
-          exit-code (if exited? (.exitValue process) 1)
-          duration  (- (System/currentTimeMillis) started-at)]
-      {:stdout-buf  (str stdout-buf)
-       :stderr-buf  (str stderr-buf)
-       :exit        exit-code
-       :duration-ms duration})))
+    ;; Bound the read by timeout — stdout EOF never comes if a daemon child
+    ;; holds the pipe, so the old post-loop waitFor never fired.
+    (let [timed-out? (= ::timeout (deref reader timeout-ms ::timeout))]
+      (when timed-out?
+        (log/warn "Subprocess timed out — destroying process tree"
+                  {:timeout-ms timeout-ms :work-dir work-dir})
+        (reset! daemons (descendant-handles process)))
+      ;; Kill on timeout or done so the reader/stderr threads can finish.
+      (when (or timed-out? @done?)
+        (destroy-tree! process @daemons))
+      (deref reader 10000 nil)
+      (.join stderr-thread 2000)
+      (let [exited?   (.waitFor process 5 java.util.concurrent.TimeUnit/SECONDS)
+            exit-code (cond @done?  0
+                            exited? (.exitValue process)
+                            :else   1)
+            duration  (- (System/currentTimeMillis) started-at)]
+        {:stdout-buf  (str stdout-buf)
+         :stderr-buf  (str stderr-buf)
+         :exit        exit-code
+         :duration-ms duration}))))
 
 (defn build-result
   "Assembles the standard agent-run result map from subprocess output and

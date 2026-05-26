@@ -10,11 +10,12 @@
    [clojure.core.async     :as async :refer [go-loop <!]]
    [taoensso.timbre        :as log]
    [org.httpkit.server     :refer [send! with-channel on-close]]
-   [morpheus.executor.engine  :as engine]
-   [morpheus.executor.wiggum  :as wiggum]
-   [morpheus.executor.store   :as store]
-   [morpheus.slug             :as slug]
-   [morpheus.ui.components    :as ui]))
+   [morpheus.executor.engine    :as engine]
+   [morpheus.executor.wiggum    :as wiggum]
+   [morpheus.executor.store     :as store]
+   [morpheus.executor.dispatch  :as dispatch]
+   [morpheus.slug               :as slug]
+   [morpheus.ui.components      :as ui]))
 
 (defn html-resp [hiccup]
   {:status  200
@@ -60,7 +61,8 @@
                (h/html [:div#node-output.node-output
                         {:hx-swap-oob "outerHTML:#node-output"}
                         [:div.detail-label [:span (str (name (:id node)) " running…")]]
-                        [:pre#live-output.detail-pre "Claude Code working…"]])))))
+                        [:pre#live-output.detail-pre
+                         (str (ui/agent-label (dispatch/resolve-agent node)) " working…")]])))))
 
     :checkpoint
     (str (h/html
@@ -152,20 +154,21 @@
             (name (:state event))]))
 
     :iteration-started
-    (str (h/html
+    (let [agent (store/run-agent (store/get-run run-store run-id))]
+     (str (h/html
            ;; hx-swap-oob applied directly to the panel's root so outerHTML
            ;; doesn't create a wrapper-and-nested duplicate id.
            (with-attr (ui/control-packet-panel (:control-packet event))
                       :hx-swap-oob "outerHTML"))
          (h/html
-           (with-attr (ui/iteration-running-row run-id (:iteration event))
+           (with-attr (ui/iteration-running-row run-id (:iteration event) agent)
                       :hx-swap-oob "outerHTML"))
          (h/html
-           (with-attr (ui/iteration-live-panel (:iteration event))
+           (with-attr (ui/iteration-live-panel (:iteration event) agent)
                       :hx-swap-oob "outerHTML"))
          (h/html
            [:div {:id "log-tail" :hx-swap-oob "beforeend"}
-            (ui/log-line :info (str "→ iteration " (:iteration event) " started"))]))
+            (ui/log-line :info (str "→ iteration " (:iteration event) " started"))])))
 
     :iteration-complete
     (let [ev (:evidence event)]
@@ -297,13 +300,29 @@
                       (send! ch (sse-event evt-name fragment))))
                   (catch Exception e
                     (log/error e "SSE replay error" {:event-type (:type event)})))))
-            ;; Wiggum: replay the most recent :run-paused if the run is
-            ;; currently paused. Necessary because the live event can be
-            ;; missed across SSE reconnects (htmx tears down and re-opens
-            ;; the EventSource on any blip; events fired during the gap
-            ;; never reach this go-loop). The OOB swap is idempotent against
-            ;; the inline panel rendered by wiggum-shell-page, and the
-            ;; textarea has hx-preserve so its content survives the swap.
+            ;; Resync packet/status/iter-count on every (re)connect. HTMX
+            ;; reopens the EventSource on any blip, so the :iteration-started
+            ;; carrying a new packet can fire during the gap — without this the
+            ;; panel keeps showing the page-load packet.
+            (when (= :wiggum rtype)
+              (try
+                (send! ch (sse-event evt-name
+                            (str (h/html (with-attr (ui/control-packet-panel @(:control-packet run))
+                                                    :hx-swap-oob "outerHTML"))
+                                 (h/html [:span {:id          "run-status"
+                                                 :hx-swap-oob "outerHTML:#run-status"
+                                                 :class       (str "status-pill status-" (name @(:state run)))}
+                                          (name @(:state run))])
+                                 (h/html [:span {:id          "wg-iter-count"
+                                                 :hx-swap-oob "outerHTML:#wg-iter-count"
+                                                 :class       "wg-iter"}
+                                          (str "iter " (count @(:iterations run)))]))))
+                (catch Exception e
+                  (log/error e "SSE wiggum state resync error"))))
+            ;; Replay the latest :run-paused if the run is paused — same
+            ;; reconnect gap as above. The OOB swap is idempotent against the
+            ;; inline panel from wiggum-shell-page, and the textarea has
+            ;; hx-preserve so typing survives.
             (when (and (= :wiggum rtype) (= :paused @(:state run)))
               (when-let [pause-ev (->> @(:event-log run)
                                        (filter #(= :run-paused (:type %)))
@@ -465,7 +484,7 @@
           live-output (when (and run (nil? ev) (= :running @(:state run)))
                         (let [buf @(:live-output run)]
                           (if (str/blank? buf)
-                            "Claude Code is working…"
+                            (str (ui/agent-label (store/run-agent run)) " is working…")
                             buf)))]
       (cond
         ev          (html-resp (ui/iteration-detail ev))

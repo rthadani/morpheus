@@ -26,6 +26,15 @@
   [run]
   (if (contains? run :iterations) :wiggum :dag))
 
+(defn run-agent
+  "Executor agent (:pi or :claude) for a run, resolved from its config."
+  [run]
+  (let [config (:config run)]
+    (if (= :pi (or (:agent (:executor-model-config config))
+                   (:agent (:model-config config))))
+      :pi
+      :claude)))
+
 (defn- dag-summary [run]
   {:run-id     (:run-id run)
    :type       :dag
@@ -38,6 +47,7 @@
   (let [events (when-let [log (:event-log run)] @log)]
     {:run-id           (:run-id run)
      :type             :wiggum
+     :agent            (run-agent run)
      :objective        (:objective run)
      :state            @(:state run)
      :iteration        (count @(:iterations run))

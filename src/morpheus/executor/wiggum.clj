@@ -545,6 +545,9 @@
                                 :success-check  (:success-check control-packet)
                                 :diff           (git-diff work-dir)}))
           ev               (assoc ev0
+                                   ;; Per-iteration packet trail; the top-level
+                                   ;; :control-packet only keeps the latest.
+                                   :control-packet control-packet
                                    :review review
                                    :phase-ended? phase-ended?
                                    :exhausted? rl?

@@ -422,6 +422,52 @@
                               for the platform's modifier idiom
                               instead — pick one and state it.
 
+                          Behaviour-verification rule (universal) — verify
+                          observable behaviour, not artifacts.  This is the
+                          single biggest cause of a run finishing at ~90%:
+                          the success-check proves files exist and unit tests
+                          pass, so whatever the check cannot SEE is where the
+                          executor stops, and the human plugs the last 10% by
+                          hand.  Whenever a feature's correctness is
+                          user-observable AND a unit-test DOM (jsdom / RTL /
+                          Vitest / jest-dom) cannot faithfully reproduce it, a
+                          passing unit test is FALSE confidence.  This covers:
+                          drag-and-drop, focus / selection / scroll, canvas /
+                          WebGL, clipboard, file upload/download, keyboard
+                          navigation, animations, and any frontend<->backend
+                          round-trip whose only real proof is `the data is
+                          still there after reload`.
+                          For these the implementing phase MUST add a real
+                          end-to-end test that drives the RUNNING system and
+                          asserts the observable outcome, and that e2e MUST be
+                          wired into :success-check so the executor actually
+                          gets the signal each iteration:
+                            web           → Playwright (`@playwright/test`)
+                                            with a `webServer` config that
+                                            boots the app, and a `test(` that
+                                            performs the real interaction
+                                            (e.g. `page.dragAndDrop(...)`),
+                                            asserts the outcome, then reloads
+                                            to prove persistence.
+                            iOS / Android → XCUITest / Espresso (or Maestro).
+                            React Native  → Detox / Maestro.
+                            Flutter       → integration_test.
+                            CLI / TUI     → spawn the built binary and assert
+                                            on real stdout, not a mocked pipe.
+                          A Playwright (or device) e2e is NOT the banned
+                          `live smoke-test` — its framework starts and stops
+                          the app deterministically, unlike ad-hoc curl /
+                          port-probe / docker commands, so it is allowed (and
+                          required) in :success-check despite the long-lived
+                          process rule below.
+                          Acceptance check must prove the e2e EXERCISES the
+                          behaviour, never merely that an implementation token
+                          is present.  Bad: grep for `draggable` or
+                          `import .*dnd`.  Good: grep for `@playwright/test`
+                          plus a `dragAndDrop`/`page.` interaction.  A
+                          unit-test-only drag-and-drop (or any behaviour in
+                          the list above) is a defect.
+
                           End with a Documentation phase covering README.md.
 
                           IMPORTANT — EDN string foot-guns inside this
@@ -487,11 +533,18 @@
                               + tests.  Do NOT include `setsid`, `fuser`,
                               `nohup`, `kill $SERVER_PID`, port probes,
                               `curl` to localhost, `docker build`, or any
-                              command that starts a long-lived process.
+                              ad-hoc command that starts a long-lived process.
                               These are fragile across runs (port busy,
                               race with `sleep`, subprocess scoping under
                               `sh -c`) AND `setsid` / `fuser` do not exist
                               on macOS.
+                              EXCEPTION: a real e2e framework that manages its
+                              own app lifecycle (Playwright with `webServer`,
+                              Detox, integration_test) is allowed AND required
+                              when the Behaviour-verification rule applies —
+                              it boots and tears down deterministically, unlike
+                              the ad-hoc commands above.  Put it last in the
+                              chain (e.g. `npm run test:e2e`).
                             Live server smoke-test, `docker build`, and
                               `docker run` belong in a manual Phase-N step
                               documented in the README — never in
@@ -505,6 +558,15 @@
                             'Work phase by phase — do not start phase N+1
                              until phase N tests pass'
                             'Run the test suite at the end of every iteration'
+                          If the project has any browser-only / interactive
+                          behaviour (per the Behaviour-verification rule —
+                          drag-and-drop, focus/scroll, canvas, clipboard,
+                          upload, navigation, persistence round-trips), always
+                          add a constraint naming the e2e as the proof, e.g.:
+                            '<behaviour> is proven by the <Playwright/Detox/...>
+                             e2e run in :success-check, not by unit tests; the
+                             e2e command must self-install its browser/runtime
+                             headless so the check is self-contained'
                           If a visual phase is involved, always add:
                             'Produce output/<artifact> in the visual phase
                              before writing any code in dependent phases'
@@ -516,6 +578,12 @@
     :anti-goals         — vector of strings.  Always include:
                             'Do not add dependencies not listed in the objective'
                             'Do not leave TODO comments or unimplemented stubs'
+                          If the project has any browser-only / interactive
+                          behaviour, always add:
+                            'Do not verify <behaviour> with unit tests alone,
+                             and do not mock the mechanism under test (e.g.
+                             DataTransfer, the network) to make a unit test
+                             pass — it is done only when the e2e passes'
                           If a visual phase is involved, always add:
                             'Do not describe UI design in prose in the
                              objective — the visual artifact is the specification'
@@ -673,10 +741,16 @@
       src/components/List.tsx
       src/components/Card.tsx
       src/__tests__/kanban.test.tsx
+      e2e/dnd.spec.ts
+      playwright.config.ts
     Implement the UI from mockup.html.
     - Named lists side-by-side; add, rename, delete lists and cards
-    - Drag-and-drop via HTML5 DnD API — no library
+    - Drag-and-drop (reorder within a list, move between lists, reorder lists)
+      via @dnd-kit; native HTML5 DnD only if the e2e below proves it works
     - Vitest + React Testing Library covering all CRUD operations
+    - Playwright e2e (e2e/dnd.spec.ts): drag a card between lists, assert it
+      moved and survives a reload — jsdom cannot simulate HTML5 drag, so this
+      e2e is the only real proof DnD works
 
     === Phase 4: Backend + API ===
     Deliverables:
@@ -719,10 +793,11 @@
 
     --- Phase 3 (React frontend) ---
     Command:
-      npm run test:web
+      npm run test:web && npm run test:e2e
     Required:
-      * Tests cover create/rename/delete for both lists and cards.
-      * Drag-and-drop uses native HTML5 events (no library import).
+      * Unit tests cover create/rename/delete for both lists and cards.
+      * Playwright e2e drags a card between lists and asserts it moved and
+        persisted after reload — this, not a unit test, is the DnD proof.
 
     --- Phase 4 (Backend + API) ---
     Command:
@@ -749,24 +824,28 @@
     && test -f src/hooks/useKanban.ts \\
     && test -f server/routes/lists.ts \\
     && test -f server/routes/cards.ts \\
+    && test -f e2e/dnd.spec.ts \\
     && test -f Dockerfile \\
     && test -f docker-compose.yml \\
     && test -f README.md \\
     && test -f CLAUDE.md \\
     && npm test \\
-    && npm run build'
+    && npm run build \\
+    && npm run test:e2e'
 
    :constraints
    ['Work phase by phase — do not start phase N+1 until phase N tests pass'
     'Run npm test and npm run build at the end of every iteration'
     'Produce output/mockup.html in Phase 2 before writing any React components'
     'All UI phases after Phase 2 must reference mockup.html — do not restate design values in the objective'
+    'Drag-and-drop is proven by the Playwright e2e (e2e/dnd.spec.ts) via npm run test:e2e, not jsdom unit tests; npm run test:e2e must install the browser headless if missing so the check is self-contained'
     'Keep all board state in a single useKanban hook']
 
    :anti-goals
-   ['Do not install react-beautiful-dnd or any drag-and-drop library'
+   ['Do not verify drag-and-drop (or any browser-only behaviour) with jsdom/RTL unit tests alone, and do not mock DataTransfer or fire synthetic drag events to pass a unit test — DnD is done only when the Playwright e2e passes'
+    'Do not install react-beautiful-dnd; @dnd-kit IS permitted for drag-and-drop'
     'Do not use an ORM — use better-sqlite3 with prepared statements'
-    'Do not add dependencies beyond what is listed in the objective'
+    'Do not add dependencies beyond what is listed in the objective (plus @dnd-kit and @playwright/test)'
     'Do not leave TODO comments or unimplemented stubs'
     'Do not describe UI design in prose in the objective — mockup.html is the specification']
 

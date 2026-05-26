@@ -144,6 +144,15 @@
           (println "Run is continuable — snapshot is intact. Resume with:")
           (println (str "  " cmd " " edn-arg " --project-dir " proj)))))
 
+    ;; Streaming agent activity. Wiggum emits :output-line (often token
+    ;; deltas → stream inline); DAG emits :node-output-line (full activity
+    ;; lines → one per line).
+    :output-line
+    (do (print (:line event)) (flush))
+
+    :node-output-line
+    (println (:line event))
+
     (:state-change :control-changed) nil
 
     nil))

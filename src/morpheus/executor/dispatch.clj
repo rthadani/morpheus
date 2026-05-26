@@ -34,7 +34,7 @@
   [node]
   (or (:agent (model-config node)) :claude))
 
-(defn- resolve-agent
+(defn resolve-agent
   "The agent (:pi or :claude) for a node/branch — an explicit :executor wins,
    otherwise auto-detect from model-config."
   [node]
