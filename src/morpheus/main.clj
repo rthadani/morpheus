@@ -23,7 +23,8 @@
   (:gen-class))
 
 (def cli-options
-  [["-p" "--project-dir PATH"        "Project directory for Claude Code"]
+  [["-p" "--project-dir PATH"        "Project directory for the agent"]
+   [nil  "--agent AGENT"             "Agent: claude or pi (default: claude)"]
    [nil  "--step"                    "Step mode: pause after each iteration"]
    [nil  "--max-iterations N"       "Maximum iterations" :parse-fn parse-long]
    [nil  "--view"                    "View only: show saved UI state"]
@@ -143,6 +144,15 @@
           (println "Run is continuable — snapshot is intact. Resume with:")
           (println (str "  " cmd " " edn-arg " --project-dir " proj)))))
 
+    ;; Streaming agent activity. Wiggum emits :output-line (often token
+    ;; deltas → stream inline); DAG emits :node-output-line (full activity
+    ;; lines → one per line).
+    :output-line
+    (do (print (:line event)) (flush))
+
+    :node-output-line
+    (println (:line event))
+
     (:state-change :control-changed) nil
 
     nil))
@@ -232,25 +242,42 @@
         (System/exit 1))))
 
 (defn- parse-model-string
-  [s]
-  (if (and s (str/includes? s "/"))
-    (let [[provider model-id] (str/split s #"/")]
-      {:provider (keyword (str/lower-case provider))
-       :model-id model-id})
-    (when s (log/debug "No override for provider and model" s))))
+  "Parses a --model string according to the agent.
+
+   :claude — splits on / to extract :provider and :model-id.
+             e.g. 'kimi/kimi-k2.6' → {:provider :kimi :model-id 'kimi-k2.6'}
+             e.g. 'claude-sonnet-4-7' → {:model-id 'claude-sonnet-4-7'}
+
+   :pi     — passes the string through as :model-id (pi handles provider/id
+             syntax internally via --model).
+             e.g. 'google/gemini-3-flash-preview' → {:model-id 'google/gemini-3-flash-preview'}"
+  [agent s]
+  (when s
+    (case (keyword agent)
+      :pi
+      {:agent    :pi
+       :model-id s}
+
+      :claude
+      (if (str/includes? s "/")
+        (let [[provider model-id] (str/split s #"/" 2)]
+          {:agent    :claude
+           :provider (keyword (str/lower-case provider))
+           :model-id model-id})
+        {:agent    :claude
+         :model-id s}))))
 
 (defn- apply-model-overrides
-  [cfg {:keys [model supervisor-model executor-model]}]
-  (let [[model supervisor-model executor-model] 
-        (map parse-model-string [model supervisor-model executor-model])] 
-  (cond-> cfg
-      model
-      (assoc :supervisor-model-config model 
-             :executor-model-config   model)
-      supervisor-model
-      (assoc :supervisor-model-config supervisor-model)
-      executor-model
-      (assoc :executor-model-config executor-model))))
+  [cfg {:keys [agent model supervisor-model executor-model]}]
+  (let [agent (or agent "claude")
+        [m s e]
+        (map (partial parse-model-string agent)
+             [model supervisor-model executor-model])]
+    (cond-> cfg
+      m (assoc :supervisor-model-config m
+               :executor-model-config   m)
+      s (assoc :supervisor-model-config s)
+      e (assoc :executor-model-config e))))
 
 (defn print-help
   [cmd]
@@ -264,9 +291,14 @@
             (println "  -f, --fresh                   Fresh run: remove cached work-dir")
             (println "  -o, --polish                  Polish pass: back-fill WHY comments")
             (println "  -P, --polish-only              Polish only: run standalone polish pass")
-            (println "      --model MODEL              Model for both supervisor and executor as minimax/MiniMax-M2.7 for example")
-            (println "      --supervisor-model MODEL  Model for supervisor only as claude/claude-haiku-4-5-20251001 for example")
-            (println "      --executor-model MODEL    Model for executor only as kimi/kimi-k2.5 for example")
+            (println "      --agent AGENT             Agent: claude or pi (default: claude)")
+            (println "      --model MODEL              Model for both supervisor and executor")
+            (println "      --supervisor-model MODEL  Model for supervisor only")
+            (println "      --executor-model MODEL    Model for executor only")
+            (println "")
+            (println "  Model format depends on --agent:")
+            (println "    --agent claude → provider/model-id  e.g. kimi/kimi-k2.6, claude/claude-sonnet-4-7")
+            (println "    --agent pi     → model pattern      e.g. google/gemini-3-flash-preview, kimi/kimi-k2.6")
             (println "  -h, --help                    Show this help")
         (println "")
         (println "Examples:")

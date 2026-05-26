@@ -1,0 +1,95 @@
+;; Kanban board — full-stack with Docker deploy, Wiggum loop, step-once mode
+;;
+;; Usage:
+;;   clj -M:run graphs/examples/kanban-fullstack-wiggum.edn --project-dir ./my-kanban
+
+{:objective
+ "Build and deploy a full-stack Kanban board application.
+
+  === Phase 1: React frontend ===
+  - Multiple named lists side-by-side (To Do, In Progress, Done)
+  - Add, rename, delete lists
+  - Add, edit, delete cards within any list
+  - Drag-and-drop: reorder cards within a list, move a card between lists, and
+    reorder lists. Use @dnd-kit (robust, accessible, testable). Native HTML5
+    DnD is permitted ONLY together with the Playwright e2e below — a nested
+    draggable + dataTransfer/state implementation is easy to get subtly wrong
+    (e.g. a card's dragstart bubbling to a draggable parent list) and jsdom
+    cannot catch it.
+  - Vitest + React Testing Library test suite covering all CRUD operations
+  - Playwright e2e at e2e/dnd.spec.ts that PROVES drag-and-drop works in a real
+    browser: load the app, drag a card from one list into another, assert the
+    card now appears under the target list, reload the page, assert the move
+    persisted. Unit tests cannot simulate HTML5 drag — this e2e is the real
+    proof and it runs in the success check.
+
+  === Phase 2: Node.js backend + SQLite ===
+  - Express server in TypeScript on port 3001
+  - SQLite database via better-sqlite3 (file: db/kanban.db)
+  - DB schema: boards(id, name), lists(id, board_id, name, title, position),
+               cards(id, list_id, title, description, position)
+  - REST API:
+      GET    /api/health
+      GET    /api/boards/:id          — full board with lists and cards
+      POST   /api/lists               — create list
+      PATCH  /api/lists/:id           — rename or reposition
+      DELETE /api/lists/:id
+      POST   /api/cards               — create card
+      PATCH  /api/cards/:id           — edit or move to different list
+      DELETE /api/cards/:id
+  - Set up the database correctly so that all the tables and colums exist
+  - Frontend fetches from the API (no more localStorage)
+  - Jest + supertest integration tests for all API endpoints
+
+  === Phase 3: Docker deploy ===
+  - Multi-stage Dockerfile: stage 1 builds frontend, stage 2 is Express server
+    that serves the built frontend as static files from /public
+  - docker-compose.yml: single `app` service, port 3001:3001,
+    named volume `kanban-data` mounted at /app/db for SQLite persistence
+  - GET /api/health returns {status: ok, uptime: <seconds>}
+  - `podman-compose up --build -d` starts cleanly
+  - `curl http://localhost:3001/api/health` returns 200
+  - `curl http://localhost:3001/` serves the React app HTML
+
+  Stack: React 18, TypeScript 5, Vite 5, Express 4, better-sqlite3, Vitest,
+  @testing-library/react, Jest, supertest, Docker.
+
+  === Phase 4: Documentation ===
+  - Create a README.md to make sure that describes the application as a summary
+  - Provide instructions in the README.md to build and deploy the application"
+
+ :project-dir nil
+
+ :success-check
+ "npm test && npm run build && podman-compose up --build -d && sleep 8 && curl -sf http://localhost:3001/api/health && curl -sf http://localhost:3001/ | grep -q '<div id=\"root\"' && npm run test:e2e && podman-compose down && test -f README.md && test -f CLAUDE.md"
+
+ :constraints
+ ["Work phase by phase: complete and test the frontend before starting the backend,
+   complete and test the backend before writing the Dockerfile"
+  "Run the relevant test suite at the end of every iteration — do not skip tests"
+  "Run `npm run build` (frontend) or `tsc --noEmit` (server) each iteration to catch type errors"
+  "Drag-and-drop MUST be proven by the Playwright e2e (e2e/dnd.spec.ts), run via `npm run test:e2e` against the running app — jsdom/RTL unit tests cannot simulate HTML5 drag and will pass while DnD is broken. The e2e drags a card between lists and asserts the move persists after reload."
+  "`npm run test:e2e` must launch the browser headless and install it if missing (e.g. an npm `pretest:e2e` running `playwright install --with-deps chromium`), so the success check is self-contained"
+  "Keep all board state in a single useKanban hook in the frontend"
+  "Use a single Express app.ts entry point — do not split into many router files"]
+
+ :anti-goals
+ ["Do not verify drag-and-drop with jsdom/RTL unit tests alone, and do not mock DataTransfer or fire synthetic drag events to make a unit test pass — DnD is only 'done' when the Playwright e2e passes in a real browser"
+  "Do not install react-beautiful-dnd; @dnd-kit IS permitted for drag-and-drop"
+  "Do not use an ORM — use better-sqlite3 directly with prepared statements"
+  "Do not add Redis, Postgres, or any dependency beyond what is listed in the objective (plus @dnd-kit and @playwright/test)"
+  "Do not create shared utility files or helper modules used only in one place"
+  "Do not leave TODO comments, unimplemented stubs, or placeholder routes"]
+
+ :max-iterations      20
+ :step-once?          false
+ :generate-claude-md? true
+ :judge-mode          :code
+ :review-threshold    :none    ; skip the judge entirely
+
+ :fallback-model    "claude-haiku-4-5-20251001"
+ :fallback-delay-ms 20000
+
+ :model-config
+ {:agent :pi :model-id "moonshotai/kimi-k2.6"}
+}

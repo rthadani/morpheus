@@ -35,6 +35,7 @@ Use this when you want the system to handle decomposition and course-correction 
 - Clojure CLI
 - Claude Code CLI (`claude --version`) with a **Max plan** or `ANTHROPIC_API_KEY` set
   - Pro plan covers interactive sessions but not `--print` subprocess calls
+- (optional) **pi CLI** (`pi --version`) to run on the `:pi` agent instead of `claude` — `npm install -g @earendil-works/pi-coding-agent`
 
 ### CLI (simplest)
 
@@ -159,11 +160,17 @@ Pre-existing expected files (carried over from prior iterations) are not violati
  :step-once?    false}
 ```
 
-## Model providers
+## Agents and providers
 
-The supervisor LLM (and any `:executor :llm` nodes) dispatch on `:provider` in
-`:model-config`. All providers shell out to the `claude` CLI — non-Anthropic
-providers just point `claude` at an Anthropic-compatible endpoint.
+Morpheus picks an LLM on two axes, both set in `:model-config`:
+
+- **`:agent`** — which CLI binary does the work: `:claude` (default, the
+  `claude` CLI) or `:pi` (the `pi` CLI). This is the same map everywhere a
+  model is chosen — the supervisor, `:task` nodes, and `:executor :llm` nodes.
+- **`:provider`** — within that agent, which backend endpoint to hit.
+
+The `:claude` agent shells out to `claude --print`; non-Anthropic providers just
+point `claude` at an Anthropic-compatible endpoint.
 
 | Provider   | How it runs                                            | Required env       |
 |------------|--------------------------------------------------------|--------------------|
@@ -200,6 +207,42 @@ Requires the `ollama` CLI on `PATH`. The model is pulled the first time it runs.
 ```bash
 export MOONSHOT_API_KEY=sk-...
 ```
+
+### Pi agent
+
+Set `:agent :pi` to run the `pi` CLI instead of `claude`. pi does its own
+provider routing, so `:model-id` uses pi's `provider/model` naming:
+
+```clojure
+{:objective     "..."
+ :success-check "npm test"
+ :model-config  {:agent :pi :model-id "moonshotai/kimi-k2.6"}}
+```
+
+```bash
+npm install -g @earendil-works/pi-coding-agent   # pi on PATH
+export MOONSHOT_API_KEY=sk-...                    # whatever the model needs
+```
+
+`:agent :pi` works everywhere a model-config does:
+
+- **Wiggum** — executor and supervisor each honour `:agent`. Put it on
+  `:model-config` for both, or split via `:executor-model-config` /
+  `:supervisor-model-config` (e.g. pi executor, claude supervisor).
+- **`:task` nodes** — set `:executor :pi` on the node, or `:agent :pi` in its
+  model-config. `:executor :claude` (or the default) keeps the `claude` CLI.
+- **`:executor :llm` nodes** — the lightweight no-filesystem path dispatches on
+  `:agent` as well.
+
+pi streams its thinking and tool calls into the live UI just like claude. The
+subprocess runner also handles pi's background `context-mode` daemon: it stops
+at pi's `agent_end` event and reaps the daemon, so a pi iteration terminates
+cleanly instead of hanging on a stdout pipe the daemon holds open.
+
+`:fallback-model` rate-limit retry applies only to the `:claude` agent; a
+rate-limited pi run surfaces as an exhaustion pause for you to resume.
+
+Example: `graphs/examples/pi-kanban-fullstack.edn`.
 
 ### Mixed setup
 

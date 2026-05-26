@@ -30,8 +30,10 @@
    [clojure.java.shell          :as shell]
    [clojure.string              :as str]
    [taoensso.timbre             :as log]
-   [morpheus.executor.claude-code  :as cc]
+   [morpheus.executor.agent        :as agent]
+   [morpheus.executor.claude-code-agent  :as cc]
    [morpheus.executor.evidence     :as evidence]
+   [morpheus.executor.pi-agent     :as pi]
    [morpheus.executor.judge        :as judge]
    [morpheus.executor.llm          :as llm]
    [morpheus.executor.store        :as store]
@@ -244,26 +246,46 @@
                       (pos? (or (:exit x) (:exit-code x) 0)))]
     (and non-zero? (llm/rate-limited? text))))
 
+(defn- executor-agent
+  "Returns :claude or :pi based on the run-config's executor model config."
+  [run-config]
+  (let [exec-cfg (or (:executor-model-config run-config)
+                     (:model-config run-config)
+                     {})]
+    (or (:agent exec-cfg) :claude)))
+
+(defn- run-agent!
+  "Dispatches to cc/run! or pi/run! based on :agent in :model-config.
+   Normalises opts so each runner gets the keys it expects."
+  [{:keys [model-config] :as opts}]
+  (case (or (:agent model-config) :claude)
+    :pi  (pi/run! opts)
+    (cc/run! (assoc opts :model (or (:model opts)
+                                     (:model-id model-config))))))
+
 (defn- run-with-fallback!
-  "Retries a rate-limited CC run once with :fallback-model after :fallback-delay-ms.
-   Fallback always runs vanilla Anthropic — :model-config is reset so a fallback
-   id like claude-haiku-4-5-20251001 doesn't get sent to e.g. Moonshot."
+  "Retries a rate-limited run once with :fallback-model after :fallback-delay-ms.
+   Fallback only applies to the :claude agent; for :pi we just return the
+   rate-limited result and let the exhaustion handler deal with it."
   [run opts run-config]
-  (let [result (cc/run! opts)]
+  (let [result (run-agent! opts)]
     (if-not (rate-limited? result)
       result
-      (if-let [fb-model (:fallback-model run-config)]
-        (let [delay-ms (:fallback-delay-ms run-config 30000)]
-          (log/warn "Rate limit detected — falling back" {:model fb-model :delay-ms delay-ms})
-          (emit! run {:type     :provider-fallback
-                      :reason   :rate-limit
-                      :fallback fb-model
-                      :delay-ms delay-ms})
-          (Thread/sleep delay-ms)
-          (cc/run! (assoc opts :model fb-model :model-config nil)))
-        (do
-          (log/warn "Rate limit detected but no :fallback-model configured")
-          result)))))
+      (if (= :pi (executor-agent run-config))
+        (do (log/warn "Rate limit detected on :pi agent — no fallback configured")
+            result)
+        (if-let [fb-model (:fallback-model run-config)]
+          (let [delay-ms (:fallback-delay-ms run-config 30000)]
+            (log/warn "Rate limit detected — falling back" {:model fb-model :delay-ms delay-ms})
+            (emit! run {:type     :provider-fallback
+                        :reason   :rate-limit
+                        :fallback fb-model
+                        :delay-ms delay-ms})
+            (Thread/sleep delay-ms)
+            (run-agent! (assoc opts :model fb-model :model-config nil)))
+          (do
+            (log/warn "Rate limit detected but no :fallback-model configured")
+            result))))))
 
 (defn- strip-path-prefix [text prefix]
   (if (seq prefix)
@@ -469,7 +491,7 @@
                                io/file .getName)
         judge-mode    (or (:judge-mode config) :code)]
     (reset! (:live-output run) "")
-    (cc/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix judge-mode))
+    (agent/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix judge-mode))
     (emit! run {:type           :iteration-started
                 :iteration      iteration
                 :work-dir       work-dir
@@ -523,6 +545,9 @@
                                 :success-check  (:success-check control-packet)
                                 :diff           (git-diff work-dir)}))
           ev               (assoc ev0
+                                   ;; Per-iteration packet trail; the top-level
+                                   ;; :control-packet only keeps the latest.
+                                   :control-packet control-packet
                                    :review review
                                    :phase-ended? phase-ended?
                                    :exhausted? rl?
@@ -594,7 +619,7 @@
           exec-cfg      (or (:executor-model-config config)
                             (:model-config config))
           primary-model (:model-id exec-cfg)]
-      (cc/write-claude-md! work-dir polish-claude-md)
+      (agent/write-claude-md! work-dir polish-claude-md)
       (emit! run {:type :polish-started :iteration iteration})
       (let [result (run-with-fallback!
                      run
@@ -658,7 +683,7 @@
                     (let [wd (or (when-let [s (stable-work-dir run-config)]
                                    (.mkdirs (io/file s))
                                    s)
-                                 (cc/make-work-dir! run-id "wiggum"))]
+                                 (agent/make-work-dir! "morpheus-" run-id "wiggum"))]
                       ;; only seed from project-dir if the work-dir is empty —
                       ;; a populated stable work-dir means a previous run was
                       ;; aborted and the user wants to keep going from where it left

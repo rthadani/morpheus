@@ -1,7 +1,7 @@
 (ns morpheus.executor.evidence
   "Pure functions for building and analysing iteration evidence — the
    deterministic record of what happened in one Wiggum iteration. File
-   snapshots are captured in claude-code/run! and passed in."
+   snapshots are captured in claude-code-agent/run! and passed in."
   (:require [clojure.set    :as set]
             [clojure.string :as str]))
 
@@ -32,9 +32,18 @@
      :helpers-added?   (boolean (some slop-name? new))
      :only-new-files?  (and (pos? (count new)) (zero? (count edited)))}))
 
+(defn- cap-output
+  "Caps stored stdout so one verbose iteration can't bloat the snapshot. Keeps
+   the tail, where the conclusion or final error lives."
+  [s]
+  (let [s (str s) n 20000]
+    (if (> (count s) n)
+      (str "…(" (- (count s) n) " chars omitted)\n" (subs s (- (count s) n)))
+      s)))
+
 (defn build
   "Constructs the evidence map for one iteration. cc-result is the enriched
-   map from claude-code/run! (snapshots, exit, model, etc.)."
+   map from claude-code-agent/run! (snapshots, exit, model, etc.)."
   [iteration cc-result verification & [top-level dir-tree expected-check]]
   (let [before  (:before-snapshot cc-result {})
         after   (:after-snapshot  cc-result {})
@@ -48,7 +57,7 @@
      :files-edited  (:edited changes)
      :files-deleted (:deleted changes)
      :exit-code     (:exit cc-result)
-     :output        (:stdout cc-result)
+     :output        (cap-output (:stdout cc-result))
      :stderr        (:stderr cc-result)
      :verification  verification
      :model         (or (:model cc-result) "unknown")

@@ -1,16 +1,16 @@
 (ns morpheus.executor.llm
-  "LLM calls — dispatches on :provider in model-config. All providers shell out
-   to the claude CLI; non-Anthropic providers just override env vars to point
-   at an Anthropic-compatible endpoint.
-     :claude  (default) — api.anthropic.com
-     :ollama            — `ollama launch claude` (auto-pulls model)
-     :kimi              — api.moonshot.ai/anthropic (reads MOONSHOT_API_KEY)
-     :minimax           — api.minimax.chat/anthropic (reads MINIMAX_API_KEY)"
+  "LLM calls — dispatches on :agent in model-config.
+     :claude (default) — shells out to the claude CLI; :provider inside
+                         routes to :ollama, :kimi, :minimax, or Anthropic.
+     :pi               — shells out to the pi CLI; :provider inside
+                         routes to whatever pi supports (google, openai, …)."
   (:require
-   [clojure.data.json   :as json]
-   [clojure.java.shell  :as shell]
-   [clojure.string      :as str]
-   [taoensso.timbre     :as log]))
+   [clojure.data.json           :as json]
+   [clojure.java.shell          :as shell]
+   [clojure.string              :as str]
+   [taoensso.timbre             :as log]
+   [morpheus.executor.agent     :as agent]
+   [morpheus.executor.pi-agent  :as pi]))
 
 (def default-model "claude-haiku-4-5-20251001")
 
@@ -53,108 +53,99 @@
                        :stderr  err}))
       (throw (ex-info tag {:exit exit :stderr err})))))
 
+(defn- prompt-with-system
+  "Prepends the system prompt as a delimited block when present."
+  [system prompt]
+  (if (seq system)
+    (str system "\n\n---\n\n" prompt)
+    prompt))
+
+(defn- anthropic-env
+  "Env overrides that point the claude CLI at an Anthropic-compatible base-url
+   authenticated by api-key, pinning every model slot to model-id."
+  [base-url api-key model-id]
+  (-> (into {} (System/getenv))
+      (assoc "ANTHROPIC_BASE_URL"             base-url
+             "ANTHROPIC_AUTH_TOKEN"           api-key
+             "ANTHROPIC_API_KEY"              ""
+             "ANTHROPIC_MODEL"                model-id
+             "ANTHROPIC_DEFAULT_OPUS_MODEL"   model-id
+             "ANTHROPIC_DEFAULT_SONNET_MODEL" model-id
+             "ANTHROPIC_DEFAULT_HAIKU_MODEL"  model-id
+             "CLAUDE_CODE_SUBAGENT_MODEL"     model-id
+             "ENABLE_TOOL_SEARCH"             "false")))
+
 (defn- complete-ollama [{:keys [model-id system]} prompt]
   (when (str/blank? model-id)
     (throw (ex-info "model-id required for :ollama provider" {:provider :ollama})))
-  (let [full-prompt (if (seq system)
-                      (str system "\n\n---\n\n" prompt)
-                      prompt)
-        args        ["ollama" "launch" "claude" "--model" model-id "--yes"
-                     "--" "--print" "--dangerously-skip-permissions"]
-        result      (apply shell/sh (concat args [:in full-prompt]))]
+  (let [args   ["ollama" "launch" "claude" "--model" model-id "--yes"
+                "--" "--print" "--dangerously-skip-permissions"]
+        result (apply shell/sh (concat args [:in (prompt-with-system system prompt)]))]
     (when (pos? (:exit result))
       (throw-cli-error! "ollama launch claude error" result))
     (str/trim (:out result))))
 
-(defn- complete-kimi
-  [{:keys [model-id base-url system]
-    :or   {model-id "kimi-k2.5"
-           base-url "https://api.moonshot.ai/anthropic"}}
-   prompt]
-  (let [api-key (System/getenv "MOONSHOT_API_KEY")]
+(defn- complete-anthropic-compatible
+  "Routes the claude CLI through a third-party Anthropic-compatible backend
+   (:kimi, :minimax). api-key comes from env-var; defaults supply the model and
+   base-url when model-config omits them."
+  [provider env-var default-model-id default-base-url
+   {:keys [model-id base-url system]} prompt]
+  (let [api-key (System/getenv env-var)]
     (when (str/blank? api-key)
-      (throw (ex-info "MOONSHOT_API_KEY env var not set" {:provider :kimi})))
-    (let [full-prompt (if (seq system)
-                        (str system "\n\n---\n\n" prompt)
-                        prompt)
-          env         (-> (into {} (System/getenv))
-                          (assoc "ANTHROPIC_BASE_URL"             base-url
-                                 "ANTHROPIC_AUTH_TOKEN"           api-key
-                                 "ANTHROPIC_API_KEY"              ""
-                                 "ANTHROPIC_MODEL"                model-id
-                                 "ANTHROPIC_DEFAULT_OPUS_MODEL"   model-id
-                                 "ANTHROPIC_DEFAULT_SONNET_MODEL" model-id
-                                 "ANTHROPIC_DEFAULT_HAIKU_MODEL"  model-id
-                                 "CLAUDE_CODE_SUBAGENT_MODEL"     model-id
-                                 "ENABLE_TOOL_SEARCH"             "false"))
-          args        (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
-                        model-id (concat ["--model" model-id]))
-          result      (apply shell/sh (concat args [:in full-prompt :env env]))]
+      (throw (ex-info (str env-var " env var not set") {:provider provider})))
+    (let [model-id (or model-id default-model-id)
+          env      (anthropic-env (or base-url default-base-url) api-key model-id)
+          args     (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
+                     model-id (concat ["--model" model-id]))
+          result   (apply shell/sh (concat args [:in (prompt-with-system system prompt) :env env]))]
       (when (pos? (:exit result))
-        (throw-cli-error! "claude CLI error (kimi)" result))
+        (throw-cli-error! (str "claude CLI error (" (name provider) ")") result))
       (str/trim (:out result)))))
 
-(defn- complete-minimax
-  [{:keys [model-id base-url system]
-    :or   {model-id "MiniMax-M2.7"
-           base-url "https://api.minimax.chat/anthropic"}}
-   prompt]
-  (let [api-key (System/getenv "MINIMAX_API_KEY")]
-    (when (str/blank? api-key)
-      (throw (ex-info "MINIMAX_API_KEY env var not set" {:provider :minimax})))
-    (let [full-prompt (if (seq system)
-                        (str system "\n\n---\n\n" prompt)
-                        prompt)
-          env         (-> (into {} (System/getenv))
-                          (assoc "ANTHROPIC_BASE_URL"             base-url
-                                 "ANTHROPIC_AUTH_TOKEN"           api-key
-                                 "ANTHROPIC_API_KEY"              ""
-                                 "ANTHROPIC_MODEL"                model-id
-                                 "ANTHROPIC_DEFAULT_OPUS_MODEL"   model-id
-                                 "ANTHROPIC_DEFAULT_SONNET_MODEL" model-id
-                                 "ANTHROPIC_DEFAULT_HAIKU_MODEL"  model-id
-                                 "CLAUDE_CODE_SUBAGENT_MODEL"     model-id
-                                 "ENABLE_TOOL_SEARCH"             "false"))
-          args        (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
-                        model-id (concat ["--model" model-id]))
-          result      (apply shell/sh (concat args [:in full-prompt :env env]))]
-      (when (pos? (:exit result))
-        (throw-cli-error! "claude CLI error (minimax)" result))
-      (str/trim (:out result)))))
+(defn- complete-kimi [model-config prompt]
+  (complete-anthropic-compatible
+    :kimi "MOONSHOT_API_KEY" "kimi-k2.5" "https://api.moonshot.ai/anthropic"
+    model-config prompt))
 
-(defn- complete-claude
-  [{:keys [model-id system]
-    :or   {model-id default-model}}
-   prompt]
-  (let [full-prompt (if (seq system)
-                      (str system "\n\n---\n\n" prompt)
-                      prompt)
-        args        (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
-                      model-id (concat ["--model" model-id]))
-        result      (apply shell/sh (concat args [:in full-prompt]))]
+(defn- complete-minimax [model-config prompt]
+  (complete-anthropic-compatible
+    :minimax "MINIMAX_API_KEY" "MiniMax-M2.7" "https://api.minimax.chat/anthropic"
+    model-config prompt))
+
+(defn- complete-anthropic
+  "Default :claude-agent provider — calls the claude CLI targeting
+   api.anthropic.com directly (no env overrides)."
+  [{:keys [model-id system] :or {model-id default-model}} prompt]
+  (let [args   (cond-> ["claude" "--print" "--dangerously-skip-permissions"]
+                 model-id (concat ["--model" model-id]))
+        result (apply shell/sh (concat args [:in (prompt-with-system system prompt)]))]
     (when (pos? (:exit result))
       (throw-cli-error! "claude CLI error" result))
     (str/trim (:out result))))
 
-(defn complete
-  "Calls claude --print, optionally routed through a non-Anthropic backend.
-   Dispatches on :provider — :ollama, :kimi, :minimax, or :claude (default)."
-  [{:keys [provider model-id] :as model-config} prompt]
-  (log/debug "LLM call" {:provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
-  (case provider
-    :ollama  (complete-ollama  model-config prompt)
-    :kimi    (complete-kimi    model-config prompt)
-    :minimax (complete-minimax model-config prompt)
-    (complete-claude model-config prompt)))
+(defmulti complete
+  "Dispatches on :agent — :claude (default) or :pi.
+   The :claude agent shells out to the claude CLI and routes to its own
+   providers (:ollama, :kimi, :minimax, or default Anthropic).
+   The :pi agent shells out to the pi CLI and routes to whatever provider
+   pi is configured for (:google, :openai, :anthropic, …)."
+  (fn [model-config _prompt]
+    (or (:agent model-config) :claude)))
 
-(defn- extract-json-object
-  "Pulls the outermost { ... } from text — robust to prose or fences around it."
-  [text]
-  (let [start (.indexOf text "{")
-        end   (.lastIndexOf text "}")]
-    (if (and (>= start 0) (> end start))
-      (subs text start (inc end))
-      text)))
+(defmethod complete :claude
+  [{:keys [provider model-id] :as model-config} prompt]
+  (log/debug "LLM call" {:agent :claude :provider (or provider :claude) :model model-id :prompt-chars (count prompt)})
+  (case provider
+    :ollama  (complete-ollama   model-config prompt)
+    :kimi    (complete-kimi     model-config prompt)
+    :minimax (complete-minimax  model-config prompt)
+    (complete-anthropic model-config prompt)))
+
+(defmethod complete :pi
+  [{:keys [model-id] :as model-config} prompt]
+  (log/debug "LLM call" {:agent :pi :model model-id :prompt-chars (count prompt)})
+  (pi/complete model-config prompt))
 
 (defn complete-json
   "Like complete but extracts a JSON object from the response and parses it."
@@ -165,11 +156,11 @@
                         (str/replace #"(?s)```[a-z]*\n?" "")
                         (str/replace #"```" "")
                         str/trim
-                        extract-json-object)]
+                        agent/extract-json-object)]
     (log/debug "complete-json raw response" {:chars (count raw) :first-50 (subs raw 0 (min 50 (count raw)))})
     (try
       (json/read-str json-str :key-fn keyword)
       (catch Exception e
         (log/error "JSON parse failed" {:raw raw})
-        (throw (ex-info (str "Supervisor returned non-JSON: " (subs raw 0 (min 200 (count raw))))
+        (throw (ex-info (str "LLM returned non-JSON: " (subs raw 0 (min 200 (count raw))))
                         {:raw raw :cause e}))))))
