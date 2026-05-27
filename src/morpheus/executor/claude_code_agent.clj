@@ -133,8 +133,11 @@
         cost-usd        (atom nil)
         on-line         (fn [line]
                           (let [parsed (parse-stream-line line)]
+                            ;; Each activity is one full assistant block — add the
+                            ;; trailing \n here; the consumer concatenates raw so
+                            ;; pi's sub-line deltas aren't mangled.
                             (when (and on-output (:activity parsed))
-                              (on-output (:activity parsed)))
+                              (on-output (str (:activity parsed) "\n")))
                             (when (:result parsed)
                               (reset! result-text (:result parsed)))
                             (when (:cost-usd parsed)

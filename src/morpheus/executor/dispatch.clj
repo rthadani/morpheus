@@ -59,7 +59,7 @@
                                   :timeout-ms  (:timeout-ms node 300000)
                                   :on-output   (fn [line]
                                                  (when-let [bufs (::output-buffers context)]
-                                                   (swap! bufs update (:id node) str line "\n"))
+                                                   (swap! bufs update (:id node) str line))
                                                  (async/put! event-ch
                                                    {:type    :node-output-line
                                                     :node-id (:id node)

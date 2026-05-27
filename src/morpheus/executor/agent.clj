@@ -9,7 +9,7 @@
    [clojure.string      :as str]
    [taoensso.timbre     :as log])
   (:import
-   [java.io BufferedReader InputStreamReader OutputStreamWriter]
+   [java.io BufferedReader InputStreamReader IOException OutputStreamWriter]
    [java.nio.file Files]
    [java.nio.file.attribute FileAttribute]))
 
@@ -218,26 +218,38 @@
         ;; self-exits and orphans them to init where we can't find them.
         daemons       (atom nil)
         reader        (future
-                        (with-open [rdr (BufferedReader.
-                                          (InputStreamReader. (.getInputStream process)))]
-                          (loop [line (.readLine rdr)]
-                            (when line
-                              (.append stdout-buf line)
-                              (.append stdout-buf "\n")
-                              (when on-line (on-line line))
-                              (when (and complete? (complete? line))
-                                (reset! daemons (descendant-handles process))
-                                (reset! done? true))
-                              (when-not @done?
-                                (recur (.readLine rdr)))))))]
+                        (try
+                          (with-open [rdr (BufferedReader.
+                                            (InputStreamReader. (.getInputStream process)))]
+                            (loop [line (.readLine rdr)]
+                              (when line
+                                (.append stdout-buf line)
+                                (.append stdout-buf "\n")
+                                (when on-line (on-line line))
+                                (when (and complete? (complete? line))
+                                  (reset! daemons (descendant-handles process))
+                                  (reset! done? true))
+                                (when-not @done?
+                                  (recur (.readLine rdr))))))
+                          ;; destroy-tree! closes stdout — readLine throws here.
+                          ;; Expected on timeout, don't fail the future.
+                          (catch IOException e
+                            (log/debug "Reader stream closed" {:msg (.getMessage e)})
+                            nil)))]
     ;; Send the prompt, then close stdin so the process sees EOF.
     (when (seq prompt)
       (with-open [w (OutputStreamWriter. (.getOutputStream process))]
         (.write w ^String prompt)
         (.flush w)))
-    ;; Bound the read by timeout — stdout EOF never comes if a daemon child
-    ;; holds the pipe, so the old post-loop waitFor never fired.
-    (let [timed-out? (= ::timeout (deref reader timeout-ms ::timeout))]
+    ;; Bound the read by timeout — stdout EOF never comes when a daemon
+    ;; child holds the pipe. deref's default only covers the timeout path,
+    ;; so wrap it to swallow an exceptional completion too.
+    (let [safe-deref  (fn [t default]
+                        (try (deref reader t default)
+                             (catch Throwable e
+                               (log/debug "Reader deref swallowed" {:msg (.getMessage e)})
+                               default)))
+          timed-out?  (= ::timeout (safe-deref timeout-ms ::timeout))]
       (when timed-out?
         (log/warn "Subprocess timed out — destroying process tree"
                   {:timeout-ms timeout-ms :work-dir work-dir})
@@ -245,7 +257,7 @@
       ;; Kill on timeout or done so the reader/stderr threads can finish.
       (when (or timed-out? @done?)
         (destroy-tree! process @daemons))
-      (deref reader 10000 nil)
+      (safe-deref 10000 nil)
       (.join stderr-thread 2000)
       (let [exited?   (.waitFor process 5 java.util.concurrent.TimeUnit/SECONDS)
             exit-code (cond @done?  0

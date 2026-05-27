@@ -89,8 +89,7 @@
     :node-output-line
     (str (h/html
            [:span {:id "live-output" :hx-swap-oob "beforeend"}
-            (str (:line event) "\n")
-            [:br]]))
+            (:line event)]))
 
     :node-error
     (str (h/html
@@ -222,10 +221,10 @@
                                   (str " — " m))))])))
 
     :output-line
+    ;; Append raw — the agent supplies its own newlines.
     (str (h/html
            [:span {:id "live-output" :hx-swap-oob "beforeend"}
-            (str (:line event) "\n")
-            [:br]]))
+            (:line event)]))
 
     :provider-fallback
     (str (h/html
@@ -297,13 +296,12 @@
                 (try
                   (let [fragment (dag-fragment run run-id event)]
                     (when fragment
-                      (send! ch (sse-event evt-name fragment))))
+                      (send! ch (sse-event evt-name fragment) false)))
                   (catch Exception e
                     (log/error e "SSE replay error" {:event-type (:type event)})))))
-            ;; Resync packet/status/iter-count on every (re)connect. HTMX
-            ;; reopens the EventSource on any blip, so the :iteration-started
-            ;; carrying a new packet can fire during the gap — without this the
-            ;; panel keeps showing the page-load packet.
+            ;; On (re)connect, resync the packet/status/iter-count — an
+            ;; :iteration-started event that fired during a reconnect gap
+            ;; would otherwise leave the panel stuck on the page-load packet.
             (when (= :wiggum rtype)
               (try
                 (send! ch (sse-event evt-name
@@ -316,7 +314,8 @@
                                  (h/html [:span {:id          "wg-iter-count"
                                                  :hx-swap-oob "outerHTML:#wg-iter-count"
                                                  :class       "wg-iter"}
-                                          (str "iter " (count @(:iterations run)))]))))
+                                          (str "iter " (count @(:iterations run)))])))
+                          false)
                 (catch Exception e
                   (log/error e "SSE wiggum state resync error"))))
             ;; Replay the latest :run-paused if the run is paused — same
@@ -329,7 +328,7 @@
                                        last)]
                 (try
                   (when-let [fragment (wiggum-fragment run-id pause-ev run-store)]
-                    (send! ch (sse-event evt-name fragment)))
+                    (send! ch (sse-event evt-name fragment) false))
                   (catch Exception e
                     (log/error e "SSE wiggum pause replay error")))))
             (go-loop []
@@ -339,7 +338,7 @@
                                    (wiggum-fragment run-id event run-store)
                                    (dag-fragment run run-id event))]
                     (when fragment
-                      (send! ch (sse-event evt-name fragment))))
+                      (send! ch (sse-event evt-name fragment) false)))
                   (catch Exception e
                     (log/error e "SSE fragment error" {:event-type (:type event)})))
                 (recur)))))))))

@@ -504,7 +504,7 @@
                           :model        primary-model
                           :model-config exec-cfg
                           :on-output    (fn [line]
-                                          (swap! (:live-output run) str line "\n")
+                                          (swap! (:live-output run) str line)
                                           (emit! run {:type      :output-line
                                                       :iteration iteration
                                                       :line      line}))}
@@ -629,7 +629,7 @@
                       :model        primary-model
                       :model-config exec-cfg
                       :on-output    (fn [line]
-                                      (swap! (:live-output run) str line "\n")
+                                      (swap! (:live-output run) str line)
                                       (emit! run {:type      :output-line
                                                   :iteration iteration
                                                   :line      line}))}

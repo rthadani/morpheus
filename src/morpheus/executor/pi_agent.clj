@@ -122,8 +122,9 @@
 (defn- parse-pi-json-line
   "Parses one pi --mode json line into a display/usage map. Any key may be
    absent: :text (assistant text delta), :thinking (reasoning delta),
-   :tool (tool activity line), :usage (token/cost from message_end / turn_end).
-   Termination is detected separately via agent-end-line?."
+   :tool (tool activity line), :usage (token/cost from message_end / turn_end),
+   :flush (boundary event — end of a message; consumer should flush its
+   buffer). Termination is detected separately via agent-end-line?."
   [line]
   (try
     (let [ev (json/read-str line :key-fn keyword)]
@@ -143,10 +144,10 @@
 
         ("message_end" "turn_end")
         (let [u (get-in ev [:message :usage])]
-          {:usage (when u
-                    {:input-tokens  (:input u)
-                     :output-tokens (:output u)
-                     :cost-usd      (get-in u [:cost :total])})})
+          (cond-> {:flush true}
+            u (assoc :usage {:input-tokens  (:input u)
+                             :output-tokens (:output u)
+                             :cost-usd      (get-in u [:cost :total])})))
 
         {}))
     (catch Exception _ {})))
@@ -185,22 +186,40 @@
                                :model    (:model-id model-config)
                                :prompt-chars (count prompt)})
   (let [before-snapshot (agent/snapshot-files work-dir)
-        ;; "" not nil, so build-result never falls back to the raw JSON stdout
-        ;; when a turn ends with only tool calls and no assistant text.
+        ;; "" not nil so build-result never falls back to raw JSON stdout
+        ;; on a tool-only turn with no assistant text.
         result-text     (atom "")
         cost-usd        (atom nil)
+        ;; text/thinking are word-sized deltas — emit raw so the consumer's
+        ;; concat produces prose. Tool lines and message boundaries add
+        ;; explicit "\n"s.
+        thinking-open?  (atom false)
         on-line         (fn [line]
                           (let [parsed (parse-pi-json-line line)]
-                            (when on-output
-                              (when-let [t  (:text parsed)]     (on-output t))
-                              (when-let [th (:thinking parsed)] (on-output th))
-                              (when-let [tl (:tool parsed)]     (on-output (str tl "\n"))))
+                            (when-let [t (:text parsed)]
+                              (when @thinking-open?
+                                (reset! thinking-open? false)
+                                (when on-output (on-output "\n")))
+                              (when on-output (on-output t))
+                              (swap! result-text str t))
+                            (when-let [th (:thinking parsed)]
+                              (when on-output
+                                (when-not @thinking-open?
+                                  (reset! thinking-open? true)
+                                  (on-output "💭 "))
+                                (on-output th)))
+                            (when-let [tl (:tool parsed)]
+                              (when on-output
+                                (when @thinking-open?
+                                  (reset! thinking-open? false)
+                                  (on-output "\n"))
+                                (on-output (str tl "\n"))))
+                            (when (:flush parsed)
+                              (when (and on-output @thinking-open?)
+                                (reset! thinking-open? false)
+                                (on-output "\n")))
                             (when (:usage parsed)
-                              (reset! cost-usd (get-in parsed [:usage :cost-usd])))
-                            ;; Only assistant text feeds the result; thinking and
-                            ;; tool lines are display-only.
-                            (when (:text parsed)
-                              (swap! result-text str (:text parsed)))))
+                              (reset! cost-usd (get-in parsed [:usage :cost-usd])))))
         sub             (agent/run-subprocess!
                           {:work-dir    work-dir
                            :prompt      prompt
@@ -211,6 +230,7 @@
                            ;; pi keeps a context-mode daemon alive after the run,
                            ;; so stdout never hits EOF — stop at agent_end.
                            :complete?   agent-end-line?})
+        _               (when (and on-output @thinking-open?) (on-output "\n"))
         after-snapshot  (agent/snapshot-files work-dir)]
     (log/info "Pi run complete"
               {:exit (:exit sub)
