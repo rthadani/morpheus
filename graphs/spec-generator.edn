@@ -5,27 +5,33 @@
 ;;
 ;; Usage:
 ;;   1. Set :description below. One line for SIMPLE/MEDIUM, a paragraph or
-;;      more for COMPLEX. Optionally append a provider keyword:
-;;        :ollama  :kimi  :glm  :openrouter  :anthropic (default)
+;;      more for COMPLEX. Optionally append an agent/provider keyword:
+;;        :ollama  :kimi  :minimax  :anthropic (default)   ; routed through claude CLI
+;;        :pi                                              ; routed through pi CLI
 ;;      Examples:
 ;;        'A CLI tool that watches a directory and prints new file summaries'
 ;;        'An HTMX todo app in Clojure with SQLite :ollama'
 ;;        'A Kafka consumer lag monitor dashboard :kimi'
 ;;        'A Clojure TUI options-trading research workbench backed by
-;;         IBKR + DuckDB + Claude Code as agent (see options-trader.edn). :glm'
+;;         IBKR + DuckDB + Claude Code as agent (see options-trader.edn). :pi'
 ;;   2. Provider env vars (must be set if non-default):
-;;        :kimi       MOONSHOT_API_KEY
-;;        :glm        ZAI_API_KEY
-;;        :openrouter OPENROUTER_API_KEY
-;;        :ollama     none — needs `ollama` CLI on PATH and the model pulled
+;;        :kimi    MOONSHOT_API_KEY
+;;        :minimax MINIMAX_API_KEY
+;;        :ollama  none — needs `ollama` CLI on PATH and the model pulled
+;;        :pi      routed via the pi CLI. Executor is always :kimi
+;;                 (kimi-k2.5); supervisor varies by complexity:
+;;                 SIMPLE→:deepseek, MEDIUM→:kimi, COMPLEX→:minimax.
+;;                 MOONSHOT_API_KEY is always required; SIMPLE also
+;;                 needs DEEPSEEK_API_KEY, COMPLEX also needs
+;;                 MINIMAX_API_KEY. Needs `pi` CLI on PATH.
 ;;   3. Run: clj -M:run graphs/spec-generator.edn --project-dir ./spec-out
 ;;   4. Output: spec-out/output/<slug>.edn — review, then run it.
 
 {:description
  "REPLACE THIS with a one-line description for SIMPLE/MEDIUM, or a full
   paragraph (multiple sentences, target stack, scope hints) for COMPLEX.
-  Optionally end with a provider keyword (:ollama :kimi :glm :openrouter
-  :anthropic). The generator strips the keyword from the slug/objective
+  Optionally end with a provider/agent keyword (:ollama :kimi :minimax
+  :anthropic :pi). The generator strips the keyword from the slug/objective
   but uses it for model selection."
 
  :objective
@@ -46,15 +52,25 @@
        SIMPLE   single script or utility, 1-2 files, no server, no persistence
        MEDIUM   full-stack app or service, 2-4 phases, standard persistence
        COMPLEX  multi-service system, 5+ phases, distributed concerns, architecture decisions
-  4. Provider — scan the description for a trailing provider keyword:
-       :ollama      local inference via Ollama (`ollama launch claude --model ...`)
+  4. Provider — scan the description for a trailing provider/agent keyword:
+       :ollama      local inference via Ollama (`ollama launch claude --model ...`).
+                    Routed through the claude CLI.
        :kimi        Moonshot via Anthropic-compatible endpoint
                     (api.moonshot.ai/anthropic). Requires MOONSHOT_API_KEY.
-       :glm         Z.ai (BigModel) Anthropic-compatible endpoint
-                    (api.z.ai/api/anthropic). Requires ZAI_API_KEY.
-       :openrouter  OpenRouter Anthropic-compatible bridge. Requires
-                    OPENROUTER_API_KEY.
-       :anthropic   Anthropic Claude API (default if no keyword present)
+                    Routed through the claude CLI.
+       :minimax     MiniMax via Anthropic-compatible endpoint
+                    (api.minimax.chat/anthropic). Requires MINIMAX_API_KEY.
+                    Routed through the claude CLI.
+       :anthropic   Anthropic Claude API (default if no keyword present).
+                    Routed through the claude CLI.
+       :pi          Routed through the pi CLI instead of claude.
+                    Executor is always :kimi (kimi-k2.5); supervisor
+                    varies by complexity (see Phase 2):
+                      SIMPLE  → supervisor :deepseek (DEEPSEEK_API_KEY)
+                      MEDIUM  → supervisor :kimi     (MOONSHOT_API_KEY)
+                      COMPLEX → supervisor :minimax  (MINIMAX_API_KEY)
+                    MOONSHOT_API_KEY is always required (executor);
+                    supervisor's env var depends on complexity.
      Strip the keyword from the description before using it as the
      objective title or slug, but record it for model selection.
      If the chosen provider needs an env var, mention it in the analysis
@@ -101,50 +117,86 @@
   === Phase 2: Choose models ===
 
   Based on complexity classification and provider, select models for all four
-  model fields in the output spec.  Use this table:
+  model fields in the output spec.  Both :executor-model-config and
+  :supervisor-model-config are MAPS, never bare strings — emitting
+  `:executor-model-config 'claude-sonnet-4-6'` is wrong and the judge will
+  fail the spec.  Use this table:
 
-  ┌────────────┬──────────┬─────────────────────────────┬──────────────────────────────┐
-  │ Provider   │ Complex  │ :executor-model-config      │ :supervisor-model-config     │
-  ├────────────┼──────────┼─────────────────────────────┼──────────────────────────────┤
-  │ :anthropic │ SIMPLE   │ claude-haiku-4-5-20251001   │ claude-sonnet-4-6            │
-  │ :anthropic │ MEDIUM   │ claude-sonnet-4-6           │ claude-sonnet-4-6            │
-  │ :anthropic │ COMPLEX  │ claude-sonnet-4-6           │ claude-opus-4-7              │
-  ├────────────┼──────────┼─────────────────────────────┼──────────────────────────────┤
-  │ :ollama    │ SIMPLE   │ qwen2.5-coder:7b            │ qwen2.5-coder:14b            │
-  │ :ollama    │ MEDIUM   │ qwen2.5-coder:14b           │ qwen2.5-coder:32b            │
-  │ :ollama    │ COMPLEX  │ qwen2.5-coder:32b           │ qwen2.5-coder:32b            │
-  ├────────────┼──────────┼─────────────────────────────┼──────────────────────────────┤
-  │ :kimi      │ ANY      │ kimi-k2.5                   │ kimi-k2.5                    │
-  │ :glm       │ ANY      │ glm-4.6                     │ glm-4.6                      │
-  │ :openrouter│ ANY      │ anthropic/claude-sonnet-4.5 │ anthropic/claude-sonnet-4.5  │
-  └────────────┴──────────┴─────────────────────────────┴──────────────────────────────┘
+  ┌────────────┬──────────┬─────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────┐
+  │ Provider   │ Complex  │ :executor-model-config                                  │ :supervisor-model-config                                 │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+  │ :anthropic │ SIMPLE   │ {:model-id 'claude-haiku-4-5-20251001'}                 │ {:model-id 'claude-sonnet-4-6'}                          │
+  │ :anthropic │ MEDIUM   │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-sonnet-4-6'}                          │
+  │ :anthropic │ COMPLEX  │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-opus-4-7'}                            │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+  │ :ollama    │ SIMPLE   │ {:provider :ollama :model-id 'qwen2.5-coder:7b'}        │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}        │
+  │ :ollama    │ MEDIUM   │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}        │
+  │ :ollama    │ COMPLEX  │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}        │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+  │ :kimi      │ ANY      │ {:provider :kimi :model-id 'kimi-k2.5'}                 │ {:provider :kimi :model-id 'kimi-k2.5'}                  │
+  │ :minimax   │ ANY      │ {:provider :minimax :model-id 'MiniMax-M2.7'}           │ {:provider :minimax :model-id 'MiniMax-M2.7'}            │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+  │ :pi        │ SIMPLE   │ {:agent :pi :provider :kimi :model-id 'kimi-k2.5'}      │ {:agent :pi :provider :deepseek :model-id 'deepseek-chat'}   │
+  │ :pi        │ MEDIUM   │ {:agent :pi :provider :kimi :model-id 'kimi-k2.6'}      │ {:agent :pi :provider :kimi :model-id 'kimi-k2.5'}       │
+  │ :pi        │ COMPLEX  │ {:agent :pi :provider :kimi :model-id 'kimi-k2.6'}      │ {:agent :pi :provider :minimax :model-id 'MiniMax-M2.7'} │
+  └────────────┴──────────┴─────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────┘
 
-  The Anthropic-compatible providers (:kimi :glm :openrouter) don't
-  publish a meaningful size ladder we can map to complexity — pick the
-  flagship model the provider exposes via its Anthropic-compat layer.
+  The Anthropic-compatible providers (:kimi :minimax) don't publish a
+  meaningful size ladder we can map to complexity — pick the flagship
+  model the provider exposes via its Anthropic-compat layer.
+
+  The :pi rows mirror the :anthropic ladder. The EXECUTOR is pinned to
+  :kimi across all three complexities (kimi-k2.5 is the workhorse coder
+  model), exactly the way :anthropic pins the executor to
+  claude-sonnet-4-6 for MEDIUM and COMPLEX. Only the SUPERVISOR varies
+  with complexity:
+    SIMPLE  → :deepseek (cheap reviewer)
+    MEDIUM  → :kimi     (same as executor)
+    COMPLEX → :minimax  (strongest reviewer for the hardest plans)
+
+  Pi keeps its own provider list (:google :openai :anthropic :kimi
+  :minimax :ollama :deepseek …); the dispatch passes `--provider` and
+  `--model` through verbatim, so unknown pi providers fall back to pi's
+  default routing. Credentials are pi's responsibility — set whatever
+  env vars the chosen pi provider needs. With executor always :kimi,
+  MOONSHOT_API_KEY is always required for pi runs; SIMPLE additionally
+  needs DEEPSEEK_API_KEY and COMPLEX additionally needs MINIMAX_API_KEY
+  for the supervisor.
 
   Also set :fallback-model:
-    :anthropic  → 'claude-haiku-4-5-20251001'
-    :ollama     → 'qwen2.5-coder:7b'
-    :kimi       → 'kimi-k2.5'
-    :glm        → 'glm-4.6'
-    :openrouter → 'anthropic/claude-haiku-4.5'
+    :anthropic → 'claude-haiku-4-5-20251001'
+    :ollama    → 'qwen2.5-coder:7b'
+    :kimi      → 'kimi-k2.5'
+    :minimax   → 'MiniMax-M2.7'
+    :pi        → omit :fallback-model and :fallback-delay-ms (no
+                 automatic fallback is wired for the pi agent; the run
+                 surfaces rate-limit exhaustion to the user instead)
 
-  For non-Anthropic providers, add `:provider <kw>` to BOTH model config
-  maps. For :glm / :openrouter / :custom also add the
-  `:base-url` and `:auth-token-env` keys the morpheus
-  `claude_code.clj/build-cmd+env` expects:
-    :kimi        :base-url 'https://api.moonshot.ai/anthropic'
-                 :auth-token-env 'MOONSHOT_API_KEY'
-    :glm         :base-url 'https://api.z.ai/api/anthropic'
-                 :auth-token-env 'ZAI_API_KEY'
-    :openrouter  :base-url 'https://openrouter.ai/api/v1'
-                 :auth-token-env 'OPENROUTER_API_KEY'
-  :anthropic and :ollama need no extra keys.
+  Model-config shape — keep it minimal:
+    :anthropic   {:model-id 'claude-sonnet-4-6'}
+    :ollama      {:provider :ollama :model-id 'qwen2.5-coder:14b'}
+    :kimi        {:provider :kimi    :model-id 'kimi-k2.5'}
+    :minimax     {:provider :minimax :model-id 'MiniMax-M2.7'}
+    :pi          {:agent :pi :provider <pi-provider-kw> :model-id '<pi-model-id>'}
+                 ;; :provider is required — pick :deepseek / :kimi /
+                 ;; :minimax per the complexity row above. The :agent :pi
+                 ;; key is what routes the run through the pi CLI instead
+                 ;; of claude.
 
-  Do NOT emit `:temperature` or `:max-tokens` keys — morpheus does not
-  thread them to the claude CLI. They're dead config and any post-edit
-  validation will flag them.
+  Provider routing is dispatched in
+  `src/morpheus/executor/claude_code_agent.clj/build-cmd+env`
+  (for the claude agent) and `src/morpheus/executor/pi_agent.clj`
+  (for the pi agent). Only the keys those dispatch functions actually
+  read are honoured — env-var names (MOONSHOT_API_KEY, MINIMAX_API_KEY)
+  are hardcoded per provider, base-urls default to the provider's
+  Anthropic-compat endpoint, and there is no :auth-token-env key.
+
+  Do NOT emit any of these dead keys — morpheus does not read them and
+  the post-edit validation will flag them:
+    :temperature, :max-tokens   — never threaded to either CLI
+    :auth-token-env             — env-var names are hardcoded per provider
+    :base-url                   — only override when targeting a non-default
+                                   endpoint for :kimi / :minimax; omit otherwise
 
   Also set :max-iterations from complexity:
     SIMPLE  → 8
@@ -594,9 +646,11 @@
     :checkpoint-every   — integer for COMPLEX runs only (max-iterations / 5
                           rounded up). Omit for SIMPLE/MEDIUM.
 
-    :step-once?         — false
+    :step-once?         — literal boolean `false` (never the string \"false\";
+                          the wiggum executor reads it with (boolean ...) and
+                          a string is truthy).
 
-    :generate-claude-md? — false
+    :generate-claude-md? — literal boolean `false`.
 
     :judge-mode         — keyword from Phase 1 step 5: :code or :research.
                           Wires the downstream judge to the matching rubric.
@@ -619,17 +673,30 @@
                           longer required. `:review-threshold :none` is the
                           single way to disable the judge.
 
-    :fallback-model     — string from Phase 2 model selection
+    :fallback-model     — string from Phase 2 model selection.
+                          Omit entirely for :pi runs.
 
-    :fallback-delay-ms  — 20000
+    :fallback-delay-ms  — 20000.
+                          Omit entirely for :pi runs.
 
-    :executor-model-config  — map from Phase 2; include :provider /
-                              :base-url / :auth-token-env keys for
-                              non-Anthropic providers per Phase 2's
-                              dispatch table. Do NOT emit :temperature
-                              or :max-tokens — they are dead keys.
+    :executor-model-config  — MAP from Phase 2, NOT a bare string. Shape:
+                                {:model-id 'model-id-here'}
+                              for Anthropic, plus :provider for
+                              :ollama/:kimi/:minimax, or :agent :pi for
+                              pi-routed configs. Do NOT emit :temperature,
+                              :max-tokens, or :auth-token-env — they are
+                              dead keys morpheus does not read.
 
-    :supervisor-model-config — same shape as executor.
+                              WRONG (string value — the spec judge will
+                              reject this and wiggum will crash with
+                              (:model-id 'claude-sonnet-4-6') returning nil):
+                                :executor-model-config 'claude-sonnet-4-6'
+
+                              RIGHT (map value):
+                                :executor-model-config {:model-id 'claude-sonnet-4-6'}
+
+    :supervisor-model-config — same MAP shape as :executor-model-config.
+                               Never a bare string.
 
   === Phase 4: Validate ===
 
@@ -648,13 +715,18 @@
        grep -q '^ :constraints'         output/<slug>.edn
        grep -q '^ :anti-goals'          output/<slug>.edn
        grep -q '^ :max-iterations'      output/<slug>.edn
+       grep -q '^ :step-once?'          output/<slug>.edn
        grep -q '^ :generate-claude-md?' output/<slug>.edn
-       grep -q '^ :executor-model'      output/<slug>.edn
-       grep -q '^ :supervisor-model'    output/<slug>.edn
        grep -q '^ :judge-mode'          output/<slug>.edn
        grep -q '^ :review-threshold'    output/<slug>.edn
        grep -qE ':judge-mode +:(code|research)' output/<slug>.edn        ; valid value
        grep -qE ':review-threshold +:(none|low|medium|high)' output/<slug>.edn
+       grep -qE ':step-once\\? +(true|false)\\b' output/<slug>.edn       ; boolean, not string
+       ;; model configs MUST be maps, never bare strings. The downstream
+       ;; wiggum executor calls (:model-id model-config) on them — a string
+       ;; value blows up.
+       grep -qE '^ :executor-model-config +\\{'   output/<slug>.edn
+       grep -qE '^ :supervisor-model-config +\\{' output/<slug>.edn
      For MEDIUM/COMPLEX add:
        grep -q '^ :acceptance-criteria' output/<slug>.edn
      For COMPLEX add:
@@ -665,7 +737,7 @@
        grep -q 'Visual reference' output/<slug>.edn
   5. Anti-pattern checks — all must be absent:
        ! grep -q 'kill $SERVER_PID'            output/<slug>.edn
-       ! grep -qE ':temperature|:max-tokens'   output/<slug>.edn  ; dead keys
+       ! grep -qE ':temperature|:max-tokens|:auth-token-env' output/<slug>.edn  ; dead keys
        ! grep -qE 'color: *#|border-radius: *[0-9]|font-size: *[0-9]' output/<slug>.edn
                                   ; tightened: only flag actual CSS values,
                                   ; not the substring 'color' in prose like
@@ -871,15 +943,17 @@
   grep -q '^ :constraints'         $SPEC &&
   grep -q '^ :anti-goals'          $SPEC &&
   grep -q '^ :max-iterations'      $SPEC &&
+  grep -q '^ :step-once?'          $SPEC &&
   grep -q '^ :generate-claude-md?' $SPEC &&
-  grep -q '^ :executor-model'      $SPEC &&
-  grep -q '^ :supervisor-model'    $SPEC &&
   grep -q '^ :judge-mode'          $SPEC &&
   grep -q '^ :review-threshold'    $SPEC &&
   grep -qE ':judge-mode +:(code|research)' $SPEC &&
   grep -qE ':review-threshold +:(none|low|medium|high)' $SPEC &&
+  grep -qE ':step-once\\? +(true|false)' $SPEC &&
+  grep -qE '^ :executor-model-config +\\{'   $SPEC &&
+  grep -qE '^ :supervisor-model-config +\\{' $SPEC &&
   ! grep -q 'kill $SERVER_PID'        $SPEC &&
-  ! grep -qE ':temperature|:max-tokens' $SPEC &&
+  ! grep -qE ':temperature|:max-tokens|:auth-token-env' $SPEC &&
   ! grep -qE 'color: *#|border-radius: *[0-9]|font-size: *[0-9]' $SPEC &&
   ! grep -q '<<<' $SPEC &&
   echo OK"
@@ -887,10 +961,10 @@
  :constraints
  ["Write the Phase 1 analysis to STDOUT before creating any file"
   "Model selection in Phase 2 must follow the table exactly — do not freestyle model IDs or use stale ones (e.g. claude-opus-4-5 is wrong; current Opus is claude-opus-4-7)"
-  "The provider keyword (:ollama :kimi :glm :openrouter :anthropic) is stripped from the slug and the objective title but must drive model selection AND the :provider/:base-url/:auth-token-env keys on the model configs"
-  "All four model fields must be set — executor, supervisor, fallback-model, fallback-delay-ms"
-  "Non-Anthropic model configs must include :provider, :base-url (for :kimi/:glm/:openrouter), and :auth-token-env keys per the Phase 2 dispatch table"
-  "Never emit :temperature or :max-tokens — they are dead keys morpheus does not thread through to the claude CLI"
+  "The provider/agent keyword (:ollama :kimi :minimax :anthropic :pi) is stripped from the slug and the objective title but must drive model selection AND the :provider / :agent keys on the model configs"
+  "All four model fields must be set — executor, supervisor, fallback-model, fallback-delay-ms — EXCEPT for :pi runs, which omit :fallback-model and :fallback-delay-ms (no automatic fallback is wired for the pi agent)"
+  "Non-Anthropic claude-routed configs must include :provider per the Phase 2 dispatch table; pi-routed configs must include :agent :pi (and may optionally include :provider for a specific pi backend)"
+  "Never emit :temperature, :max-tokens, or :auth-token-env — they are dead keys morpheus does not read; env-var names are hardcoded per provider in build-cmd+env"
   "Pick the visual artifact based on the kind of UI: web→mockup.html, TUI→mockup.txt, CLI→expected-session.txt, none→skip the visual phase"
   "The output spec's :objective must use single-quoted 'literals' or backtick `code` for any embedded code/JSON snippets — unescaped double-quotes terminate the outer EDN string and make the file unparseable"
   "MEDIUM and COMPLEX outputs must include an :acceptance-criteria key with per-phase shell gates"
@@ -911,14 +985,15 @@
 
  :anti-goals
  ["Do not invent model IDs not listed in the Phase 2 table"
-  "Do not include the provider keyword (:ollama :kimi :glm :openrouter :anthropic) in the output spec slug or title"
+  "Do not include the provider/agent keyword (:ollama :kimi :minimax :anthropic :pi) in the output spec slug or title"
   "Do not produce anything other than the analysis and the single output EDN file"
   "Do not write placeholder values — every field must be fully filled in"
   "Do not wrap the EDN in markdown code fences — the file must be raw EDN"
   "Do not set :generate-claude-md? to true — this is a single-output spec, not a full project"
   "Do not write CSS, colour values, or layout descriptions in the output spec :objective — that belongs in the visual artifact"
   "Do not produce a thin SIMPLE-shaped spec when the description is COMPLEX (multi-service, persistent storage, agent integration, etc.); under-detailing is the most common failure mode"
-  "Do not emit :temperature or :max-tokens keys"
+  "Do not emit :temperature, :max-tokens, or :auth-token-env keys — none of them are read by morpheus"
+  "Do not list :glm, :openrouter, or :custom as a provider — they are not implemented in claude_code_agent.clj/build-cmd+env (only :ollama, :kimi, :minimax, and the default :anthropic are wired for the claude agent; pi has its own provider list)"
   "Do not omit :judge-mode or :review-threshold from the output spec — defaulting silently to :code is wrong for research-style deliverables and the user has no way to discover the mismatch from the generated file alone"
   "Do not pick :judge-mode :spec for the output — that mode is for reviewing specs themselves, not for downstream runs of those specs"
   "Do not emit `setsid` or `fuser` anywhere in the output spec — both are Linux-only and the user runs morpheus on macOS where these commands fail with exit 127"

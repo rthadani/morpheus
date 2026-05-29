@@ -80,7 +80,7 @@
         (when (or (:helpers-added? slop) (:only-new-files? slop)
                   (> (:new-file-ratio slop 0) 70))
           (println (str "  slop: new-ratio=" (:new-file-ratio slop) "%"
-                        (when (:helpers-added? slop)  " helpers-added")
+       
                         (when (:only-new-files? slop) " only-new-files")))))
       (when-let [v (:verification ev)]
         (println (str "  verify: "
