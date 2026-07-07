@@ -67,7 +67,7 @@ clj -M:run graphs/examples/todo-app-dag.edn --project-dir /tmp/my-todo-app
 clj -M:run graphs/examples/todo-app-wiggum.edn --project-dir /tmp/my-todo-app --step
 ```
 
-The terminal streams events as nodes/iterations complete. Checkpoint nodes prompt interactively (`approve / revise / abort`). The UI is live at `http://localhost:7777/runs/1` while the run is active.
+The terminal streams events as nodes/iterations complete. Checkpoint nodes prompt interactively (`approve / revise / abort`). The UI is live at `http://localhost:7777/runs/<project-name>` while the run is active.
 
 ### REPL
 
@@ -112,10 +112,10 @@ Open `http://localhost:7777/runs/<id>` to see the review panel. It shows the ite
 
 | Button | When it appears | What it does |
 |--------|-----------------|--------------|
-| **Continue →** | always | Accept the iteration and move on. Anything you typed in the textarea is folded into the next control packet as `## Human reviewer feedback`. |
-| **Retry ↺** | always | Re-run the same iteration with the same control packet (useful after a transient failure). |
-| **Restore ⎌** | only when the judge produced a review | `git restore` the work-dir to the state before this iteration and re-enter the phase. Use when the iteration did damage. |
-| **Ignore judge ⤳** | only when the judge produced a review | Drop the judge's review from the iteration's evidence and continue. The supervisor won't see the judge's complaints. Use when the judge is stuck or wrongly flagging. |
+| **Continue** | always | Accept the iteration and move on. Anything you typed in the textarea is folded into the next control packet as `## Human reviewer feedback`. |
+| **Retry** | always | Re-run the same iteration with the same control packet (useful after a transient failure). |
+| **Restore** | only when the judge produced a review | `git restore` the work-dir to the state before this iteration and re-enter the phase. Use when the iteration did damage. |
+| **Ignore judge** | only when the judge produced a review | Drop the judge's review from the iteration's evidence and continue. The supervisor won't see the judge's complaints. Use when the judge is stuck or wrongly flagging. |
 | **Abort** | always | Stop the run. |
 
 The textarea is stable across SSE events — you can type while iterations stream behind the panel without losing focus or content.
