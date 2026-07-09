@@ -462,10 +462,14 @@
        (str "exit " exit-code)]
       [:span.iter-detail-dur (str secs "s")]
       (when model [:span.iter-detail-model model])
-      (if cost-usd
+      (cond
+        (and cost-usd (pos? (+ tok-in tok-out)))
+        [:span.iter-detail-tokens
+         (str "↑" tok-in " ↓" tok-out " · " (format "$%.4f" (double cost-usd)))]
+        cost-usd
         [:span.iter-detail-tokens (format "$%.4f" (double cost-usd))]
-        (when (pos? (+ tok-in tok-out))
-          [:span.iter-detail-tokens (str "~" (+ tok-in tok-out) " tok")]))]
+        (pos? (+ tok-in tok-out))
+        [:span.iter-detail-tokens (str "~" (+ tok-in tok-out) " tok")])]
 
      ;; The packet that drove THIS iteration, first — so review reads "what was
      ;; asked" before "what was produced". The live column only has the latest.
@@ -684,6 +688,17 @@
       :placeholder "Guide next iteration… (sent to supervisor before it plans the next step)"}]
     [:button {:type "submit" :class "btn-primary steer-btn"} "Steer →"]]])
 
+(defn total-cost-str
+  "Formats the cumulative cost/token count across all iterations for the topbar."
+  [evidence-list]
+  (let [costs (keep :cost-usd evidence-list)]
+    (if (seq costs)
+      (format "$%.4f" (double (reduce + costs)))
+      (let [toks (reduce + 0 (map #(+ (get-in % [:approx-tokens :in] 0)
+                                       (get-in % [:approx-tokens :out] 0))
+                                   evidence-list))]
+        (when (pos? toks) (str "~" toks "t"))))))
+
 (defn wiggum-shell-page [run-id summary]
   (let [state         (:state summary :pending)
         objective     (:objective summary "…")
@@ -693,7 +708,8 @@
         step-once?    (get-in summary [:control :step-once?] false)
         latest        (last evidence-list)
         pause-event   (:last-pause-event summary)
-        paused?       (= :paused state)]
+        paused?       (= :paused state)
+        tok-str       (total-cost-str evidence-list)]
     [:html
      (page-head (str "Morpheus · " run-id))
      [:body
@@ -706,6 +722,7 @@
         [:span.wg-obj objective]
         [:span#run-status {:class (str "status-pill status-" (name state))} (name state)]
         [:span#wg-iter-count.wg-iter (str "iter " iteration)]
+        (when tok-str [:span#wg-tokens.wg-iter tok-str])
         (when-let [wd (:work-dir summary)]
           [:span.wg-workdir {:title wd} (str "→ " wd)])
         (step-toggle run-id step-once?)

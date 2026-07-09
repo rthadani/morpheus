@@ -83,11 +83,15 @@ phase as a hard boundary:
 
 - Scope the control packet's objective to the **earliest incomplete phase only**.
   Do not mention, reference, or instruct the executor to begin any later phase.
-- A phase is complete when its deliverables are present in the directory tree
-  and its verification passes (or the expected_files from the prior packet are
-  all present). Use the evidence — do not guess.
-- Once a phase is complete, advance the objective to the next phase. Do not ask
-  the executor to revisit finished phases.
+- A phase is complete when the evidence contains the line
+  `*** PHASE COMPLETE ***`. When you see that line, you MUST advance to the
+  next phase immediately — do not re-assign the same phase, do not add extra
+  constraints to \"tighten\" it, do not ask for tests that belong to a later phase.
+- If the phase-check line is absent or says INCOMPLETE, keep the same phase
+  objective and adjust constraints/anti_goals to unblock the executor.
+- The overall verification (success-check) will keep failing until all phases
+  are done — ignore its failure as a signal about the current phase.
+  Use only the `*** PHASE COMPLETE ***` / INCOMPLETE line for phase gating.
 - Add an anti_goal entry explicitly forbidding the executor from starting later
   phases: e.g. \"Do not start the backend — focus only on the React frontend.\"
 
@@ -273,3 +277,62 @@ to the next iteration.")
    :success-check success-check
    :anti-goals    (vec anti-goals)
    :brief         "First iteration — no prior evidence."})
+
+(def ^:private pivot-system-prompt
+  "You are a debugging advisor reviewing a stuck autonomous executor.
+The executor has failed the same verification check multiple times in a row.
+Analyze the evidence and respond with 2-4 sentences:
+1. The root cause — what specifically is failing and why (quote the actual error text if visible).
+2. One concrete alternative approach to try next.
+Be specific to the actual error output. Do not give generic advice like 'try TDD' or 'simplify'.
+Do not repeat advice that earlier iterations have already tried.
+Plain prose only — no JSON, no markdown, no bullet points.")
+
+(defn- format-pivot-evidence [evidence-list]
+  (str/join "\n\n"
+    (map (fn [ev]
+           (let [ver  (:verification ev)
+                 tail (when (and ver (pos? (:exit ver 0)))
+                        (some-> (:output ver) str/trim
+                                (as-> s (if (> (count s) 400)
+                                          (str "…" (subs s (- (count s) 400)))
+                                          s))))
+                 out  (when (pos? (:exit-code ev 0))
+                        (let [o (str/trim (or (:output ev) ""))]
+                          (when (seq o)
+                            (if (> (count o) 400)
+                              (str "…" (subs o (- (count o) 400)))
+                              o))))]
+             (str "--- iteration " (:iteration ev) " ---\n"
+                  "exit=" (:exit-code ev) "  "
+                  "files-written=" (count (:files-written ev)) "\n"
+                  (when tail (str "verification failure:\n  " tail "\n"))
+                  (when out  (str "executor output tail:\n  " out)))))
+         evidence-list)))
+
+(defn suggest-pivot!
+  "Analyses recent stuck evidence and returns a short plain-prose suggestion
+   for the supervisor's user-feedback slot.  Returns nil when the LLM call
+   fails — callers must handle nil gracefully."
+  [run-objective current-packet recent-evidence model-config]
+  (let [n      (count recent-evidence)
+        cfg    (merge default-model-config
+                      {:system pivot-system-prompt}
+                      model-config)
+        prompt (str/join "\n\n"
+                 ["## Goal"
+                  run-objective
+                  "## What the executor was last told"
+                  (str "objective: " (:objective current-packet))
+                  (when (seq (:expected-files current-packet))
+                    (str "expected files: "
+                         (str/join ", " (:expected-files current-packet))))
+                  "## Recent failed iterations"
+                  (format-pivot-evidence recent-evidence)
+                  "## Your task"
+                  (str "The executor has failed verification " n " time"
+                       (when (> n 1) "s") " in a row.\n"
+                       "Diagnose the root cause from the evidence above and "
+                       "suggest one concrete alternative approach.")])]
+    (log/info "Suggest-pivot calling LLM" {:iterations n})
+    (llm/complete cfg prompt)))

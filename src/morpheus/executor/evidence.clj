@@ -44,12 +44,16 @@
 (defn build
   "Constructs the evidence map for one iteration. cc-result is the enriched
    map from claude-code-agent/run! (snapshots, exit, model, etc.)."
-  [iteration cc-result verification & [top-level dir-tree expected-check]]
+  [iteration cc-result verification & [top-level dir-tree expected-check phase-result]]
   (let [before  (:before-snapshot cc-result {})
         after   (:after-snapshot  cc-result {})
         changes (classify-changes before after)
         in-chars  (or (:prompt-chars cc-result) 0)
-        out-chars (count (or (:stdout cc-result) ""))]
+        out-chars (count (or (:stdout cc-result) ""))
+        tok-in    (let [real (:input-tokens cc-result)]
+                    (if (pos? (or real 0)) real (int (/ in-chars 4))))
+        tok-out   (let [real (:output-tokens cc-result)]
+                    (if (pos? (or real 0)) real (int (/ out-chars 4))))]
     {:iteration     iteration
      :started-at    (:started-at  cc-result)
      :duration-ms   (:duration-ms cc-result)
@@ -60,11 +64,11 @@
      :output        (cap-output (:stdout cc-result))
      :stderr        (:stderr cc-result)
      :verification  verification
+     :phase-result  phase-result
      :model         (or (:model cc-result) "unknown")
      :provider      (or (:provider cc-result) "anthropic")
      :slop-signals  (slop-signals changes)
-     :approx-tokens {:in  (int (/ in-chars 4))
-                     :out (int (/ out-chars 4))}
+     :approx-tokens {:in tok-in :out tok-out}
      :cost-usd       (:cost-usd cc-result)
      :top-level      top-level
      :dir-tree       dir-tree
@@ -85,22 +89,31 @@
          (when-let [b (sev-block "HIGH"   :high)]   (str b "\n"))
          (when-let [b (sev-block "medium" :medium)] (str b "\n"))
          (when-let [b (sev-block "low"    :low)]    (str b "\n"))
-         "    NOTE: address violations in the next control packet — "
-         "tighten constraints, rescope expected_files, or add anti-goals "
-         "so the executor doesn't repeat them.")))
+         (when (seq violations)
+           (str "    NOTE: address violations in the next control packet — "
+                "tighten constraints, rescope expected_files, or add anti-goals "
+                "so the executor doesn't repeat them.")))))
+
+(defn- review-actionable?
+  "True when the review contains information the supervisor needs to act on."
+  [{:keys [recommendation violations]}]
+  (or (= :restore recommendation)
+      (= :needs-review recommendation)
+      (seq violations)))
 
 (defn summarise
   "Compact multi-line evidence string for the supervisor's prompt."
   [{:keys [iteration duration-ms files-written files-edited
-           exit-code verification slop-signals top-level dir-tree
+           exit-code verification phase-result slop-signals top-level dir-tree
            expected-check review]}]
-  (let [secs     (int (/ (or duration-ms 0) 1000))
-        ver-str  (if verification
-                   (str "exit=" (:exit verification)
-                        (when (pos? (:exit verification 0))
-                          (str " — " (some-> (:output verification)
-                                             (subs 0 (min 600 (count (:output verification))))))))
-                   "not run")]
+  (let [secs          (int (/ (or duration-ms 0) 1000))
+        ver-str       (if verification
+                        (str "exit=" (:exit verification)
+                             (when (pos? (:exit verification 0))
+                               (str " — " (some-> (:output verification)
+                                                   (subs 0 (min 600 (count (:output verification))))))))
+                        "not run")
+        phase-passed? (and phase-result (zero? (:exit phase-result)))]
     (str/join "\n"
               [(str "Iteration " iteration " (" secs "s, exit=" exit-code ")")
                (when (seq top-level)
@@ -108,17 +121,22 @@
                (str "  Files written : " (count files-written))
                (str "  Files edited  : " (count files-edited))
                (str "  Verification  : " ver-str)
+               (when phase-result
+                 (if phase-passed?
+                   "  *** PHASE COMPLETE — all expected files present. Advance the objective to the next phase. Do NOT re-assign this phase. ***"
+                   (str "  Phase check   : INCOMPLETE — "
+                        (some-> (:output phase-result) (subs 0 (min 300 (count (:output phase-result))))))))
                (str "  Slop signals  : "
                     "new-ratio=" (:new-file-ratio slop-signals) "% "
                     "helpers=" (:helpers-added? slop-signals) " "
                     "only-new=" (:only-new-files? slop-signals))
                (when expected-check
-                 (str "  Declared targets (supervisor's own expected_files from prior packet):"
+                 (str "  Declared targets:"
                       (when (seq (:present expected-check))
                         (str "\n    ✓ " (str/join "\n    ✓ " (:present expected-check))))
                       (when (seq (:missing expected-check))
                         (str "\n    ✗ " (str/join "\n    ✗ " (:missing expected-check))))))
-               (when review (format-review review))
+               (when (review-actionable? review) (format-review review))
                (when (seq dir-tree)
                  (str "  Directory tree :\n"
                       (str/join "\n" (map #(str "    " %)

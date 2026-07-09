@@ -144,11 +144,7 @@
           (println "Run is continuable — snapshot is intact. Resume with:")
           (println (str "  " cmd " " edn-arg " --project-dir " proj)))))
 
-    ;; Streaming agent activity — print raw; the agent supplies its own \n.
-    (:output-line :node-output-line)
-    (do (print (:line event)) (flush))
-
-    (:state-change :control-changed) nil
+    (:output-line :node-output-line :state-change :control-changed) nil
 
     nil))
 

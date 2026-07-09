@@ -42,15 +42,15 @@
         result (apply shell/sh (concat args [:in prompt]))]
     (when (pos? (:exit result))
       (agent/throw-cli-error!
-        (str "pi CLI error" (when provider (str " (" (name provider) ")")))
-        result))
+       (str "pi CLI error" (when provider (str " (" (name provider) ")")))
+       result))
     (str/trim (:out result))))
 
 (defn- complete-default [cfg prompt] (run-pi! cfg prompt))
 (defn- complete-google   [cfg prompt] (run-pi! (assoc cfg :provider :google)    prompt))
 (defn- complete-openai   [cfg prompt] (run-pi! (assoc cfg :provider :openai)    prompt))
 (defn- complete-anthropic [cfg prompt] (run-pi! (assoc cfg :provider :anthropic) prompt))
-(defn- complete-kimi     [cfg prompt] (run-pi! (assoc cfg :provider :kimi)      prompt))
+(defn- complete-kimi     [cfg prompt] (run-pi! (assoc cfg :provider :moonshotai)      prompt))
 (defn- complete-minimax  [cfg prompt] (run-pi! (assoc cfg :provider :minimax)   prompt))
 (defn- complete-ollama   [cfg prompt] (run-pi! (assoc cfg :provider :ollama)    prompt))
 
@@ -152,12 +152,25 @@
         {}))
     (catch Exception _ {})))
 
+(def ^:private thinking-guardrail
+  (str "Think concisely. Match reasoning depth to the task — "
+       "a simple file edit needs one or two lines of thought, not paragraphs. "
+       "Act as soon as you have a confident path forward. "
+       "Do not re-examine settled conclusions, revisit completed steps, "
+       "enumerate unlikely edge cases, or loop on 'but wait' self-corrections. "
+       "For coding tasks: decide once, then write code immediately without narrating what you are about to do."))
+
 (defn- build-pi-cmd
-  "Builds the pi command vector from model-config."
-  [{:keys [provider model-id]}]
-  (cond-> ["pi" "-p" "--mode" "json" "--no-context-files"]
-    provider (conj "--provider" (name provider))
-    model-id (conj "--model" model-id)))
+  "Builds the pi command vector from model-config.
+   :thinking — thinking level passed to pi (default: minimal).
+   :thinking-guardrail? — when true, appends a system-prompt instruction to
+     suppress verbose reasoning. Only needed for models that ignore --thinking."
+  [{:keys [provider model-id thinking thinking-guardrail?]}]
+  (cond-> ["pi" "-p" "--mode" "json" "--approve" "--no-session"
+           "--thinking" (or thinking "minimal")]
+    thinking-guardrail? (into ["--append-system-prompt" thinking-guardrail])
+    provider            (conj "--provider" (name provider))
+    model-id            (conj "--model" model-id)))
 
 (defn- agent-end-line?
   "pi's terminal event. Not message_end (fires per message, incl. the echoed
@@ -190,47 +203,33 @@
         ;; on a tool-only turn with no assistant text.
         result-text     (atom "")
         cost-usd        (atom nil)
+        input-tokens    (atom 0)
+        output-tokens   (atom 0)
         ;; text/thinking are word-sized deltas — emit raw so the consumer's
         ;; concat produces prose. Tool lines and message boundaries add
         ;; explicit "\n"s.
-        thinking-open?  (atom false)
         on-line         (fn [line]
                           (let [parsed (parse-pi-json-line line)]
                             (when-let [t (:text parsed)]
-                              (when @thinking-open?
-                                (reset! thinking-open? false)
-                                (when on-output (on-output "\n")))
                               (when on-output (on-output t))
                               (swap! result-text str t))
-                            (when-let [th (:thinking parsed)]
-                              (when on-output
-                                (when-not @thinking-open?
-                                  (reset! thinking-open? true)
-                                  (on-output "💭 "))
-                                (on-output th)))
                             (when-let [tl (:tool parsed)]
-                              (when on-output
-                                (when @thinking-open?
-                                  (reset! thinking-open? false)
-                                  (on-output "\n"))
-                                (on-output (str tl "\n"))))
-                            (when (:flush parsed)
-                              (when (and on-output @thinking-open?)
-                                (reset! thinking-open? false)
-                                (on-output "\n")))
-                            (when (:usage parsed)
-                              (reset! cost-usd (get-in parsed [:usage :cost-usd])))))
+                              (when on-output (on-output (str tl "\n"))))
+                            (when-let [u (:usage parsed)]
+                              (reset! cost-usd (:cost-usd u))
+                              (swap! input-tokens  + (or (:input-tokens u)  0))
+                              (swap! output-tokens + (or (:output-tokens u) 0)))))
         sub             (agent/run-subprocess!
-                          {:work-dir    work-dir
-                           :prompt      prompt
-                           :project-dir project-dir
-                           :timeout-ms  timeout-ms
-                           :cmd         (build-pi-cmd model-config)
-                           :on-line     on-line
+                         {:work-dir    work-dir
+                          :prompt      prompt
+                          :project-dir project-dir
+                          :timeout-ms  timeout-ms
+                          :cmd         (build-pi-cmd model-config)
+                          :on-line     on-line
                            ;; pi keeps a context-mode daemon alive after the run,
                            ;; so stdout never hits EOF — stop at agent_end.
-                           :complete?   agent-end-line?})
-        _               (when (and on-output @thinking-open?) (on-output "\n"))
+                          :complete?   agent-end-line?})
+        _               nil
         after-snapshot  (agent/snapshot-files work-dir)]
     (log/info "Pi run complete"
               {:exit (:exit sub)
@@ -240,18 +239,20 @@
     (when (not (str/blank? (:stderr-buf sub)))
       (log/warn "Pi stderr" (:stderr-buf sub)))
     (agent/build-result
-      {:work-dir        work-dir
-       :stdout          (:stdout-buf sub)
-       :stderr          (:stderr-buf sub)
-       :exit            (:exit sub)
-       :duration-ms     (:duration-ms sub)
-       :prompt-chars    (count prompt)
-       :result-text     @result-text
-       :cost-usd        @cost-usd
-       :model           (:model-id model-config)
-       :provider        (name (or (:provider model-config) :default))
-       :before-snapshot before-snapshot
-       :after-snapshot  after-snapshot})))
+     {:work-dir        work-dir
+      :stdout          (:stdout-buf sub)
+      :stderr          (:stderr-buf sub)
+      :exit            (:exit sub)
+      :duration-ms     (:duration-ms sub)
+      :prompt-chars    (count prompt)
+      :result-text     @result-text
+      :cost-usd        @cost-usd
+      :input-tokens    @input-tokens
+      :output-tokens   @output-tokens
+      :model           (:model-id model-config)
+      :provider        (name (or (:provider model-config) :default))
+      :before-snapshot before-snapshot
+      :after-snapshot  after-snapshot})))
 
 (defn run-plan!
   "Plan-mode: analyses the codebase and returns a structured plan without
@@ -261,9 +262,9 @@
   (log/info "Pi plan mode" {:work-dir work-dir})
   (agent/seed-project! project-dir work-dir)
   (let [result (shell/sh
-                 "pi" "-p" "--no-context-files"
-                 :in (str prompt agent/planning-suffix)
-                 :dir work-dir)]
+                "pi" "-p" "--approve"
+                :in (str prompt agent/planning-suffix)
+                :dir work-dir)]
     {:stdout        (:out result)
      :exit          (:exit result)
      :files-written []

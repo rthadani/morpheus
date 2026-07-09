@@ -520,7 +520,18 @@
           ;; the iteration in which they all exist (or immediately when none).
           phase-ended?     (or (empty? expected)
                                (empty? (:missing expected-check)))
-          ev0              (evidence/build iteration cc-result verification top-level tree expected-check)
+          ;; Explicit shell-level phase check derived from expected-files so
+          ;; the supervisor sees a binary PASSED/FAILED signal independent of
+          ;; the overall success-check. Prevents GLM-class supervisors from
+          ;; conflating "overall verification failed" with "phase not done".
+          phase-check      (when (seq expected)
+                             (str/join " && "
+                               (map #(str "test -" (if (str/ends-with? % "/") "d" "f")
+                                          " " (pr-str %))
+                                    expected)))
+          phase-result     (when phase-check
+                             (run-verification! work-dir phase-check))
+          ev0              (evidence/build iteration cc-result verification top-level tree expected-check phase-result)
           review-disabled? (or (= :none (:review-threshold config))
                                (false? (:review? config)))   ; legacy alias
           ;; Skip the judge for rate-limited iterations — the output is an
@@ -733,6 +744,7 @@
         review           (:review ev)
         review-threshold (or (:review-threshold run-config) :high)
         review-pause?    (and phase-ended?
+                              verified?
                               (judge/requires-pause? review review-threshold))]
     {:verified?      verified?
      :exhausted?     exhausted?
@@ -745,6 +757,38 @@
                          (:step-once? @(:control run))
                          milestone-hit?
                          review-pause?)}))
+
+(defn- consecutive-verify-failures
+  "Counts how many of the most recent iterations (newest-first) failed
+   verification without being rate-limited. Resets to 0 on any passing iter."
+  [iterations-atom]
+  (->> @iterations-atom
+       reverse
+       (take-while #(and (some? (:verification %))
+                         (pos? (:exit (:verification %) 0))
+                         (not (:exhausted? %))))
+       count))
+
+(defn- auto-steer!
+  "When the executor is stuck (consecutive verify failures hitting a multiple of
+   stuck-threshold), calls the supervisor's pivot analyser and returns a
+   context-aware strategy suggestion, or nil when disabled / not triggered /
+   LLM call fails. Only fires when no manual steer is queued."
+  [run run-config manual-steer control-packet]
+  (when (and (:auto-steer? run-config) (nil? manual-steer))
+    (let [threshold (or (:stuck-threshold run-config) 3)
+          n         (consecutive-verify-failures (:iterations run))]
+      (when (and (pos? n) (zero? (mod n threshold)))
+        (try
+          (supervisor/suggest-pivot!
+            (:objective run-config)
+            control-packet
+            (recent-evidence (:iterations run) threshold)
+            (or (:supervisor-model-config run-config)
+                (:model-config run-config {})))
+          (catch Exception e
+            (log/warn "Auto-steer pivot call failed" {:message (ex-message e)})
+            nil))))))
 
 (defn- merge-steer+feedback [feedback steer]
   (cond (and feedback steer) (str feedback "\n\n" steer)
@@ -932,12 +976,20 @@
 
                   :else
                   (do (commit-phase!)
-                      (recur (inc iteration)
-                             (retry-on-exhaustion run iteration
-                               (build-next-packet run-config control-packet
-                                                  (recent-evidence (:iterations run) 3)
-                                                  (consume-steer! run)
-                                                  initial-state)))))))))
+                      (let [manual (consume-steer! run)
+                            auto   (auto-steer! run run-config manual control-packet)]
+                        (when auto
+                          (emit! run {:type :steer-queued
+                                      :text (str "[auto] "
+                                                 (if (> (count auto) 120)
+                                                   (str (subs auto 0 120) "…")
+                                                   auto))}))
+                        (recur (inc iteration)
+                               (retry-on-exhaustion run iteration
+                                 (build-next-packet run-config control-packet
+                                                    (recent-evidence (:iterations run) 3)
+                                                    (merge-steer+feedback manual auto)
+                                                    initial-state))))))))))
 
         (catch Exception e
           (let [d (when (instance? clojure.lang.ExceptionInfo e) (ex-data e))]

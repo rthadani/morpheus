@@ -170,7 +170,12 @@
             (ui/log-line :info (str "→ iteration " (:iteration event) " started"))])))
 
     :iteration-complete
-    (let [ev (:evidence event)]
+    (let [ev        (:evidence event)
+          run       (store/get-run run-store run-id)
+          all-iters (when run @(:iterations run))
+          tok-str   (ui/total-cost-str (if (some #(= (:iteration %) (:iteration ev)) all-iters)
+                                         all-iters
+                                         (conj (vec all-iters) ev)))]
       (str ;; afterend FIRST inserts the sibling while #iter-row-running is in DOM;
            ;; outerHTML SECOND replaces it. Order matters — afterend runs against
            ;; the live element, not the detached one.
@@ -186,6 +191,11 @@
              [:span {:id "wg-iter-count" :hx-swap-oob "outerHTML:#wg-iter-count"
                      :class "wg-iter"}
               (str "iter " (:iteration ev))])
+           (when tok-str
+             (h/html
+               [:span {:id "wg-tokens" :hx-swap-oob "outerHTML:#wg-tokens"
+                       :class "wg-iter"}
+                tok-str]))
            (h/html
              [:div {:id "log-tail" :hx-swap-oob "beforeend"}
               (ui/log-line (if (zero? (or (:exit-code ev) 0)) :ok :warn)
@@ -304,18 +314,25 @@
             ;; would otherwise leave the panel stuck on the page-load packet.
             (when (= :wiggum rtype)
               (try
-                (send! ch (sse-event evt-name
-                            (str (h/html (with-attr (ui/control-packet-panel @(:control-packet run))
-                                                    :hx-swap-oob "outerHTML"))
-                                 (h/html [:span {:id          "run-status"
-                                                 :hx-swap-oob "outerHTML:#run-status"
-                                                 :class       (str "status-pill status-" (name @(:state run)))}
-                                          (name @(:state run))])
-                                 (h/html [:span {:id          "wg-iter-count"
-                                                 :hx-swap-oob "outerHTML:#wg-iter-count"
-                                                 :class       "wg-iter"}
-                                          (str "iter " (count @(:iterations run)))])))
-                          false)
+                (let [iters    @(:iterations run)
+                      tok-str  (ui/total-cost-str iters)]
+                  (send! ch (sse-event evt-name
+                              (str (h/html (with-attr (ui/control-packet-panel @(:control-packet run))
+                                                      :hx-swap-oob "outerHTML"))
+                                   (h/html [:span {:id          "run-status"
+                                                   :hx-swap-oob "outerHTML:#run-status"
+                                                   :class       (str "status-pill status-" (name @(:state run)))}
+                                            (name @(:state run))])
+                                   (h/html [:span {:id          "wg-iter-count"
+                                                   :hx-swap-oob "outerHTML:#wg-iter-count"
+                                                   :class       "wg-iter"}
+                                            (str "iter " (count iters))])
+                                   (when tok-str
+                                     (h/html [:span {:id          "wg-tokens"
+                                                     :hx-swap-oob "outerHTML:#wg-tokens"
+                                                     :class       "wg-iter"}
+                                              tok-str]))))
+                            false))
                 (catch Exception e
                   (log/error e "SSE wiggum state resync error"))))
             ;; Replay the latest :run-paused if the run is paused — same

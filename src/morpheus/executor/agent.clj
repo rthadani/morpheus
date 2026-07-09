@@ -121,11 +121,27 @@
 ;; JSON extraction
 
 (defn extract-json-object
-  "Pulls the outermost { ... } from text — robust to prose or fences around it."
+  "Pulls the first JSON object from text, skipping EDN maps in prose.
+   Finds the first '{' whose next non-whitespace character is '\"' (a JSON
+   string key), so that EDN maps like {':phases ...} in surrounding prose
+   are skipped."
   [text]
-  (let [start (.indexOf text "{")
+  (let [n   (count text)
+        ;; Walk forward to find '{' followed (after whitespace) by '"'
+        start (loop [i 0]
+                (when (< i n)
+                  (if (= (.charAt text i) \{)
+                    (let [j (loop [k (inc i)]
+                              (when (< k n)
+                                (if (= (.charAt text k) \space)
+                                  (recur (inc k))
+                                  k)))]
+                      (if (and j (= (.charAt text j) \"))
+                        i
+                        (recur (inc i))))
+                    (recur (inc i)))))
         end   (.lastIndexOf text "}")]
-    (if (and (>= start 0) (> end start))
+    (if (and start (> end start))
       (subs text start (inc end))
       text)))
 
@@ -274,7 +290,7 @@
    file snapshots.  Callers supply the stdout string and optionally a
    result-text override (e.g. extracted from a JSON stream)."
   [{:keys [work-dir stdout stderr exit duration-ms prompt-chars
-           result-text cost-usd model provider
+           result-text cost-usd input-tokens output-tokens model provider
            before-snapshot after-snapshot]}]
   (let [stdout-str (or result-text stdout)]
     {:stdout          stdout-str
@@ -287,6 +303,8 @@
      :duration-ms     duration-ms
      :prompt-chars    prompt-chars
      :cost-usd        cost-usd
+     :input-tokens    input-tokens
+     :output-tokens   output-tokens
      :model           model
      :provider        provider
      :work-dir        work-dir}))

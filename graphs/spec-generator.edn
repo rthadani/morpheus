@@ -956,6 +956,7 @@
   ! grep -qE ':temperature|:max-tokens|:auth-token-env' $SPEC &&
   ! grep -qE 'color: *#|border-radius: *[0-9]|font-size: *[0-9]' $SPEC &&
   ! grep -q '<<<' $SPEC &&
+  ! grep -q '^ :phases' $SPEC &&
   echo OK"
 
  :constraints
@@ -1001,7 +1002,8 @@
   "Do not embed verbatim file bodies of more than ~50 lines in :objective — emit them as separate Phase-1 deliverable files instead; large embedded bodies bloat iteration-1 CLAUDE.md and the supervisor's per-iteration prompt"
   "Do not produce an :objective longer than 12000 characters — it is the single biggest driver of context bloat across the whole downstream run"
   "Do not produce a :success-check whose only commands are `test -f` checks — it must invoke the project's tests so syntactically broken code is caught"
-  "Do not prescribe a specific test runner in the schema/rules sections of generator output — pick the idiom of the chosen stack (the executor knows them all) and only mention concrete commands inside the generated spec itself"]
+  "Do not prescribe a specific test runner in the schema/rules sections of generator output — pick the idiom of the chosen stack (the executor knows them all) and only mention concrete commands inside the generated spec itself"
+  "Do not emit a :phases key in the output spec — all phase detail belongs inside the :objective string as === Phase N: name === headings with Deliverables: blocks; a separate :phases key is unused by wiggum and will fail validation"]
 
  :max-iterations      6
  :step-once?          false
