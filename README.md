@@ -34,11 +34,12 @@ Use this when you want full control over decomposition and sequencing.
 
 ### Wiggum loop
 
-You state an objective and a success check (`npm test -- --run`, `clj -M:test`, etc.). The loop runs the executor agent (`claude` or `pi`), captures evidence (files written/edited, verification exit code), and passes that to a supervisor LLM that emits a tighter control packet for the next iteration. Repeats until the success check passes or max iterations is reached.
+You state an objective and a success check (`npm test`, `clj -M:test`, etc.). The loop runs the executor agent (`claude` or `pi`), captures evidence (files written/edited, verification exit code, token cost), and passes that to a supervisor LLM that emits a tighter control packet for the next iteration. Repeats until the success check passes or max iterations is reached.
 
 ```
 graphs/examples/todo-app-wiggum.edn          (Clojure + htmx)
 graphs/examples/todo-app-react-wiggum.edn    (React + TypeScript)
+graphs/examples/pi-kanban-fullstack.edn      (pi executor)
 ```
 
 Use this when you want the system to handle decomposition and course-correction autonomously.
@@ -50,7 +51,7 @@ Use this when you want the system to handle decomposition and course-correction 
 - Clojure CLI
 - Claude Code CLI (`claude --version`) with a **Max plan** or `ANTHROPIC_API_KEY` set
   - Pro plan covers interactive sessions but not `--print` subprocess calls
-- (optional) **pi CLI** (`pi --version`) to run on the `:pi` agent instead of `claude` — `npm install -g @earendil-works/pi-coding-agent`
+- (optional) **pi CLI** (`pi --version`) — `npm install -g @earendil-works/pi-coding-agent`
 
 ### CLI (simplest)
 
@@ -100,7 +101,7 @@ clj -M:nrepl   # nREPL on port 7888
 
 ## The judge and end-of-iteration review
 
-Wiggum runs aren't fully autonomous — at certain points, the loop pauses and waits for you (Morpheus pulls the operator out of the Matrix and asks you whether to send them back in). Three things can trigger a pause:
+Wiggum runs aren't fully autonomous — at certain points, the loop pauses and waits for you. Three things can trigger a pause:
 
 - **Judge pause** — at the end of every phase (an iteration whose `expected_files` are all present), an LLM judge inspects the git diff against the previously-accepted state, scores it 0–10, and emits violations tagged `high` / `medium` / `low`. If any violation meets the configured `:review-threshold` (default `:high`), the run pauses.
 - **Milestone pause** — every `:checkpoint-every` iterations, regardless of the judge.
@@ -145,7 +146,7 @@ How the textarea content is interpreted depends on what you write:
   - `:spec` — review of an automatically-generated Wiggum implementation spec EDN.
   - `:research` — citation discipline, source diversity, faithfulness to source.
 
-Pre-existing expected files (carried over from prior iterations) are not violations. The judge sees a clear breakdown of what was carried over, what was produced this iteration, and what is genuinely missing — so an iteration that satisfies the goal entirely from prior work won't be flagged as "agent did nothing."
+Pre-existing expected files (carried over from prior iterations) are not violations. The judge sees a clear breakdown of what was carried over, what was produced this iteration, and what is genuinely missing.
 
 ## Writing a graph
 
@@ -163,47 +164,93 @@ Pre-existing expected files (carried over from prior iterations) are not violati
  :output-key  :my-node/output}
 ```
 
-### Wiggum config
+### Wiggum config (full key reference)
 
 ```clojure
-{:objective     "Build a working X that does Y and Z."
- :project-dir   nil            ; set at runtime
- :success-check "npm test -- --run"
- :constraints   ["Write tests alongside implementation"]
- :anti-goals    ["Do not add dependencies that aren't immediately used"]
- :max-iterations 15
- :step-once?    false}
+{;; Core
+ :objective          "Build a working X that does Y and Z."
+ :project-dir        nil             ; copied into work-dir at start; set at runtime
+ :success-check      "npm test"      ; shell command; exit 0 = done. Default "echo ok"
+ :max-iterations     20              ; hard cap (default 20)
+ :timeout-ms         300000          ; per-iteration agent timeout (default 5 min)
+
+ ;; Phase constraints (initial values for the first control packet)
+ :constraints        ["Write tests alongside implementation"]
+ :anti-goals         ["Do not add dependencies that aren't immediately used"]
+
+ ;; Per-phase acceptance gates (MEDIUM/COMPLEX specs)
+ ;; Shell commands the supervisor runs at the end of each phase to confirm it
+ ;; is done before advancing. Format: --- Phase N (name) --- / Command: / Required: *
+ :acceptance-criteria nil
+
+ ;; Model selection
+ :model-config            nil   ; LLM for both executor and supervisor
+ :executor-model-config   nil   ; overrides executor only
+ :supervisor-model-config nil   ; overrides supervisor only
+ :fallback-model          nil   ; model-id to retry on Anthropic rate-limit (claude agent only)
+ :fallback-delay-ms       30000 ; ms to wait before fallback retry
+
+ ;; Review / judge
+ :judge-mode       :code   ; :code | :spec | :research
+ :review-threshold :high   ; :none | :low | :medium | :high
+
+ ;; Run behaviour
+ :step-once?          false  ; pause after every iteration
+ :checkpoint-every    nil    ; pause every N iterations regardless of judge
+ :generate-claude-md? true   ; write a CLAUDE.md to the project root after success
+ :polish-pass?        false  ; one extra pass after verification to add WHY comments
+
+ ;; Auto-steer (stuck-loop recovery)
+ :auto-steer?      false  ; when true, diagnose why the executor is stuck and
+                          ; inject a pivot suggestion into the supervisor after
+                          ; :stuck-threshold consecutive verify failures
+ :stuck-threshold  3}     ; how many consecutive failures before triggering a pivot
 ```
+
+**Auto-steer** calls an LLM to analyse recent failed evidence (verification output, files tried) and generates a context-specific pivot suggestion that feeds into the next supervisor call as human-style feedback. Works with both `claude` and `pi` executors.
 
 ## Agents and providers
 
-Morpheus picks an LLM on two axes, both set in `:model-config`:
+Morpheus picks an LLM on two axes, both set in `:model-config` (or the per-side overrides):
 
-- **`:agent`** — which CLI binary does the work: `:claude` (default, the
-  `claude` CLI) or `:pi` (the `pi` CLI). This is the same map everywhere a
-  model is chosen — the supervisor, `:task` nodes, and `:executor :llm` nodes.
+- **`:agent`** — which CLI binary does the work: `:claude` (default, the `claude` CLI) or `:pi` (the `pi` CLI).
 - **`:provider`** — within that agent, which backend endpoint to hit.
 
-The `:claude` agent shells out to `claude --print`; non-Anthropic providers just
-point `claude` at an Anthropic-compatible endpoint.
+### Claude agent providers
 
-| Provider   | How it runs                                            | Required env       |
-|------------|--------------------------------------------------------|--------------------|
-| `:claude`  | `claude --print` against api.anthropic.com (default)   | `ANTHROPIC_API_KEY`|
-| `:ollama`  | `ollama launch claude` — auto-starts server, auto-pulls model | none (local)|
-| `:kimi`    | `claude --print` against api.moonshot.ai/anthropic     | `MOONSHOT_API_KEY` |
+The `:claude` agent shells out to `claude --print`. Non-Anthropic providers point it at an Anthropic-compatible endpoint.
 
-`:model-config` sets both executor and supervisor; use `:executor-model-config`
-or `:supervisor-model-config` to override one side.
+| Provider    | Backend                                   | Required env        |
+|-------------|-------------------------------------------|---------------------|
+| (default)   | `claude --print` → api.anthropic.com      | `ANTHROPIC_API_KEY` |
+| `:ollama`   | local Ollama server, auto-pulls model     | none                |
+| `:kimi`     | `claude --print` → api.moonshot.ai        | `MOONSHOT_API_KEY`  |
+
+`:minimax` is supported for the **supervisor** (LLM calls) but not for the claude executor.
+
+### Pi agent providers
+
+The `:pi` agent routes through the `pi` CLI, which has its own provider list.
+
+| `:provider` | Backend                    | Required env        |
+|-------------|----------------------------|---------------------|
+| (default)   | pi's default routing       | per-provider        |
+| `:kimi`     | Moonshot AI (kimi-k2.x)    | `MOONSHOT_API_KEY`  |
+| `:minimax`  | MiniMax                    | `MINIMAX_API_KEY`   |
+| `:anthropic`| Anthropic via pi           | `ANTHROPIC_API_KEY` |
+| `:openai`   | OpenAI via pi              | `OPENAI_API_KEY`    |
+| `:google`   | Google via pi              | `GOOGLE_API_KEY`    |
+| `:ollama`   | local Ollama via pi        | none                |
+
+Any provider keyword not in the list above is passed through verbatim to pi's `--provider` flag.
 
 ### Ollama (local)
 
 ```clojure
 {:objective     "..."
  :success-check "clj -M:test"
- :model-config
- {:provider :ollama
-  :model-id "qwen2.5-coder:32b"}}   ; required — pulled on first use
+ :executor-model-config   {:provider :ollama :model-id "qwen2.5-coder:32b"}
+ :supervisor-model-config {:model-id "claude-sonnet-4-6"}}
 ```
 
 Requires the `ollama` CLI on `PATH`. The model is pulled the first time it runs.
@@ -213,10 +260,8 @@ Requires the `ollama` CLI on `PATH`. The model is pulled the first time it runs.
 ```clojure
 {:objective     "..."
  :success-check "clj -M:test"
- :model-config
- {:provider :kimi
-  :model-id "kimi-k2.5"                              ; default
-  :base-url "https://api.moonshot.ai/anthropic"}}    ; default
+ :executor-model-config   {:provider :kimi :model-id "kimi-k2.5"}
+ :supervisor-model-config {:model-id "claude-sonnet-4-6"}}
 ```
 
 ```bash
@@ -226,55 +271,44 @@ export MOONSHOT_API_KEY=sk-...
 ### Pi agent
 
 Set `:agent :pi` to run the `pi` CLI instead of `claude`. pi does its own
-provider routing, so `:model-id` uses pi's `provider/model` naming:
+provider routing — `:provider` uses Morpheus's keyword (`:kimi`, `:minimax`, etc.) and `:model-id` is the model name the provider exposes:
 
 ```clojure
 {:objective     "..."
  :success-check "npm test"
- :model-config  {:agent :pi :model-id "moonshotai/kimi-k2.6"}}
+ :executor-model-config   {:agent :pi :provider :kimi    :model-id "kimi-k2.6"}
+ :supervisor-model-config {:agent :pi :provider :minimax :model-id "MiniMax-M2.7"}}
 ```
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent   # pi on PATH
-export MOONSHOT_API_KEY=sk-...                    # whatever the model needs
+npm install -g @earendil-works/pi-coding-agent
+export MOONSHOT_API_KEY=sk-...     # for :kimi
+export MINIMAX_API_KEY=sk-...      # for :minimax
 ```
 
-`:agent :pi` works everywhere a model-config does:
+`:agent :pi` works everywhere a model-config does — executor, supervisor, and `:executor :llm` nodes.
 
-- **Wiggum** — executor and supervisor each honour `:agent`. Put it on
-  `:model-config` for both, or split via `:executor-model-config` /
-  `:supervisor-model-config` (e.g. pi executor, claude supervisor).
-- **`:task` nodes** — set `:executor :pi` on the node, or `:agent :pi` in its
-  model-config. `:executor :claude` (or the default) keeps the `claude` CLI.
-- **`:executor :llm` nodes** — the lightweight no-filesystem path dispatches on
-  `:agent` as well.
+pi streams its thinking and tool calls into the live UI just like claude. The subprocess runner handles pi's background `context-mode` daemon: it stops at pi's `agent_end` event and reaps the daemon, so a pi iteration terminates cleanly.
 
-pi streams its thinking and tool calls into the live UI just like claude. The
-subprocess runner also handles pi's background `context-mode` daemon: it stops
-at pi's `agent_end` event and reaps the daemon, so a pi iteration terminates
-cleanly instead of hanging on a stdout pipe the daemon holds open.
-
-`:fallback-model` rate-limit retry applies only to the `:claude` agent; a
-rate-limited pi run surfaces as an exhaustion pause for you to resume.
-
-Example: `graphs/examples/pi-kanban-fullstack.edn`.
+Rate-limit fallback (`:fallback-model`) applies only to the `:claude` agent. A rate-limited pi run surfaces as an exhaustion pause for you to resume.
 
 ### Mixed setup
 
-Both `:executor-model-config` and `:supervisor-model-config` accept the same
-`:provider` dispatch — you can run the executor on Kimi and reason with Sonnet
-on the supervisor side, or any other split:
+`:executor-model-config` and `:supervisor-model-config` can each use a different agent and provider:
 
 ```clojure
-{:executor-model-config   {:provider :kimi   :model-id "kimi-k2.5"}
- :supervisor-model-config {:provider :claude :model-id "claude-sonnet-4-6"}}
+;; pi executor, Anthropic supervisor
+{:executor-model-config   {:agent :pi :provider :kimi :model-id "kimi-k2.6"}
+ :supervisor-model-config {:model-id "claude-sonnet-4-6"}}
+
+;; Kimi executor, MiniMax supervisor (all via pi)
+{:executor-model-config   {:agent :pi :provider :kimi    :model-id "kimi-k2.6"}
+ :supervisor-model-config {:agent :pi :provider :minimax :model-id "MiniMax-M2.7"}}
 ```
 
-If `:fallback-model` is set, it always runs against vanilla Anthropic — the
-executor's `:provider` is reset on rate-limit retry so a fallback id like
-`claude-haiku-4-5-20251001` doesn't get sent to e.g. Moonshot.
+If `:fallback-model` is set, it always runs against vanilla Anthropic — the executor's `:provider` is reset on rate-limit retry so the fallback id isn't sent to a non-Anthropic endpoint.
 
-## Node types
+## Node types for DAG nodes
 
 | Type           | Executor              | Use for                                    |
 |----------------|-----------------------|--------------------------------------------|
@@ -287,7 +321,7 @@ executor's `:provider` is reset on rate-limit retry so a fallback id like
 | `:shell`       | sh subprocess         | Run tests, build commands, etc.            |
 | `:http`        | http-kit              | Webhooks, external APIs                    |
 
-## Extending
+### Extending
 
 **New node type:** add keyword to `graph/schema.clj`, add `defmethod execute-node!` in `executor/dispatch.clj`, add hiccup rendering in `ui/components.clj`.
 
