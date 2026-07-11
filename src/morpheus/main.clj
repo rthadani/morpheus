@@ -31,6 +31,7 @@
    [nil  "--fresh"                   "Fresh run: remove cached work-dir"]
    [nil  "--polish"                  "Polish pass: back-fill WHY comments"]
    [nil  "--polish-only"             "Polish only: run standalone polish pass"]
+   [nil  "--description DESC"         "Description to pass to spec-generator (overrides EDN :description)"]
    [nil  "--model MODEL"             "Model for both supervisor and executor (overrides EDN)"]
    [nil  "--supervisor-model MODEL"  "Model for supervisor (overrides EDN)"]
    [nil  "--executor-model MODEL"    "Model for executor (overrides EDN)"]
@@ -300,7 +301,7 @@
 
 (defn -main [& args]
   (let [{:keys [edn-file project-dir step max-iterations
-                view fresh polish polish-only help]
+                view fresh polish polish-only help description]
          :as   opts} (parse-args args)]
 
     (when help
@@ -367,7 +368,8 @@
                             project-dir    (assoc :project-dir project-dir)
                             step           (assoc :step-once? true)
                             max-iterations (assoc :max-iterations max-iterations)
-                            polish         (assoc :polish-pass? true)))
+                            polish         (assoc :polish-pass? true)
+                            description    (assoc :description description)))
 
                         :dag
                         (engine/execute! run-id cfg
