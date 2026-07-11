@@ -13,6 +13,7 @@
    [morpheus.executor.claude-code-agent :as cc]
    [morpheus.executor.llm       :as llm]
    [morpheus.executor.pi-agent  :as pi]
+   [morpheus.executor.store     :as store]
    [morpheus.graph.context      :as ctx]
    [morpheus.graph.topo         :as topo]))
 
@@ -251,7 +252,7 @@
           (edn/read-string (slurp (first edns))))))))
 
 (defmethod execute-node! :wiggum
-  [node inputs _context _graph-atom event-ch]
+  [node inputs context _graph-atom event-ch]
   (log/info "Wiggum node" (:id node))
   (let [execute!   (requiring-resolve 'morpheus.executor.wiggum/execute!)
         from-input (:run-config-from-input node)
@@ -270,6 +271,8 @@
         run-config (merge base-cfg extra)
         run-id     (str (name (:id node)) "-" (System/currentTimeMillis))
         sub-run    (execute! run-id run-config)]
+    (when-let [rs (:morpheus.executor/run-store context)]
+      (store/add-run! rs sub-run))
     (async/put! event-ch {:type       :wiggum-started
                           :node-id    (:id node)
                           :sub-run-id run-id})

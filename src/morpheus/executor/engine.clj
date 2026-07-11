@@ -11,20 +11,21 @@
 (defn create-run
   "Returns a fresh run map. graph-atom holds the live graph (may grow via
    graph-expand). All mutable state in atoms."
-  [run-id graph initial-context]
-  (let [event-ch (chan 64)]
-    {:run-id         run-id
-     :graph-atom     (atom graph)
-     :context        (atom (merge (:graph/context graph) initial-context))
-     :state          (atom {})
-     :output-buffers (atom {})
-     :steer-buffer   (atom nil)
-     :aborted?       (atom false)
-     :event-log      (atom [])
-     :event-ch       event-ch
-     :event-mult     (async/mult event-ch)
-     :resume-ch      (chan 1)
-     :started-at     (System/currentTimeMillis)}))
+  ([run-id graph initial-context] (create-run run-id graph initial-context {}))
+  ([run-id graph initial-context initial-state]
+   (let [event-ch (chan 64)]
+     {:run-id         run-id
+      :graph-atom     (atom graph)
+      :context        (atom (merge (:graph/context graph) initial-context))
+      :state          (atom initial-state)
+      :output-buffers (atom {})
+      :steer-buffer   (atom nil)
+      :aborted?       (atom false)
+      :event-log      (atom [])
+      :event-ch       event-ch
+      :event-mult     (async/mult event-ch)
+      :resume-ch      (chan 1)
+      :started-at     (System/currentTimeMillis)})))
 
 (defn- set-state! [{:keys [state event-ch]} node-id new-state]
   (swap! state assoc node-id new-state)
@@ -71,8 +72,9 @@
   "Starts the executor in a go-loop. Returns the run map immediately. Sends
    events to (:event-ch run) as nodes execute. Pauses at :checkpoint nodes
    and waits on (:resume-ch run)."
-  [run-id graph initial-context]
-  (let [run (create-run run-id graph initial-context)]
+  ([run-id graph initial-context] (execute! run-id graph initial-context {}))
+  ([run-id graph initial-context initial-state]
+  (let [run (create-run run-id graph initial-context initial-state)]
     (go
       (emit! run {:type :run-started :run-id run-id})
       (loop []
@@ -128,7 +130,7 @@
             (do
               (<! (async/timeout 100))
               (recur))))))
-    run))
+    run)))
 
 (defn resume!
   "Acts on a paused checkpoint. action-map: {:action :approve|:revise|:abort

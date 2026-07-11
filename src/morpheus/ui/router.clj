@@ -4,6 +4,7 @@
   (:require
    [reitit.ring            :as ring]
    [ring.middleware.params :as params]
+   [clojure.edn            :as edn]
    [clojure.java.io        :as io]
    [clojure.string         :as str]
    [hiccup2.core           :as h]
@@ -46,6 +47,8 @@
     (str "event: " event-name "\n"
          data-lines "\n\n")))
 
+(declare with-attr)
+
 (defn- dag-fragment [run run-id event]
   (case (:type event)
     :state-change
@@ -55,8 +58,8 @@
       (when node
         (str ;; Replace the whole canvas div — individual <g> OOB swaps fail because
              ;; HTMX parses them as HTML unknowns inside #sse-sink (a div), not as SVG.
-             (h/html (update (ui/dag-canvas nodes state-map)
-                             1 assoc :hx-swap-oob "outerHTML:#dag-canvas"))
+             (h/html (with-attr (ui/dag-canvas nodes state-map)
+                                :hx-swap-oob "outerHTML:#dag-canvas"))
              (when (= :running (:state event))
                (h/html [:div#node-output.node-output
                         {:hx-swap-oob "outerHTML:#node-output"}
@@ -413,7 +416,7 @@
 (defn start-run-handler [run-store]
   (fn [{:keys [body-params]}]
     (let [graph  (:graph body-params)
-          ctx    (:context body-params {})
+          ctx    (assoc (:context body-params {}) :morpheus.executor/run-store run-store)
           run-id (or (slug/slugify (:graph-name body-params))
                      (str "dag_" (System/currentTimeMillis)))
           run    (engine/execute! run-id graph ctx)]
@@ -522,26 +525,70 @@
         live-output (html-resp [:pre#live-output.iter-output.iter-output-live live-output])
         :else       {:status 404 :body "Iteration not found"}))))
 
-(defn css-handler [_]
-  (if-let [r (io/resource "public/style.css")]
-    {:status  200
-     :headers {"Content-Type" "text/css; charset=utf-8"}
-     :body    (slurp r)}
-    {:status 404 :body "style.css not found"}))
+(defn- static-handler [path content-type]
+  (fn [_]
+    (if-let [r (io/resource (str "public/" path))]
+      {:status  200
+       :headers {"Content-Type" content-type}
+       :body    (slurp r)}
+      {:status 404 :body (str path " not found")})))
 
-(defn favicon-handler [_]
-  (if-let [r (io/resource "public/favicon.svg")]
-    {:status  200
-     :headers {"Content-Type"  "image/svg+xml; charset=utf-8"
-               "Cache-Control" "public, max-age=86400"}
-     :body    (slurp r)}
-    {:status 404 :body "favicon not found"}))
+(def css-handler     (static-handler "style.css"        "text/css; charset=utf-8"))
+(def favicon-handler (static-handler "favicon.svg"      "image/svg+xml; charset=utf-8"))
+(def theme-js-handler      (static-handler "theme-init.js"    "text/javascript; charset=utf-8"))
+(def tailwind-cfg-handler  (static-handler "tailwind-config.js" "text/javascript; charset=utf-8"))
+
+(defn- cfg-type [cfg]
+  (cond
+    (contains? cfg :graph/nodes) :dag
+    (contains? cfg :objective)   :wiggum))
+
+(defn launch-handler [run-store]
+  (fn [request]
+    (let [params      (:params request)
+          edn-file    (get params "edn-file")
+          project-dir (not-empty (get params "project-dir"))
+          step?       (= "true" (get params "step"))
+          max-iter    (some-> (get params "max-iterations") not-empty parse-long)
+          description (not-empty (get params "description"))]
+      (if-not (and edn-file (.exists (io/file edn-file)))
+        {:status 400 :body (str "file not found: " edn-file)}
+        (try
+          (let [raw    (edn/read-string (slurp edn-file))
+                rtype  (cfg-type raw)
+                cfg    (cond-> raw
+                         project-dir (assoc :project-dir project-dir)
+                         step?       (assoc :step-once? true)
+                         max-iter    (assoc :max-iterations max-iter)
+                         description (assoc :description description))
+                run-id (or (case rtype
+                             :wiggum (slug/project-slug project-dir)
+                             :dag    (slug/graph-slug edn-file))
+                           (str "run_" (System/currentTimeMillis)))
+                run    (case rtype
+                         :wiggum
+                         (wiggum/execute! run-id cfg)
+                         :dag
+                         (engine/execute! run-id cfg
+                           (cond-> {:morpheus.executor/run-store run-store}
+                             project-dir
+                             (assoc :graph/params
+                                    (assoc (:graph/params cfg {}) :project-dir project-dir))
+                             description
+                             (assoc :describe/output description))
+                           (if description {:describe :done} {})))]
+            (store/add-run! run-store run)
+            {:status 200 :headers {"Content-Type" "text/plain"} :body run-id})
+          (catch Exception e
+            {:status 500 :body (str "launch failed: " (ex-message e))}))))))
 
 (defn create-router [run-store]
   (ring/ring-handler
     (ring/router
-      [["/style.css"   {:get css-handler}]
-       ["/favicon.svg" {:get favicon-handler}]
+      [["/style.css"          {:get css-handler}]
+       ["/favicon.svg"        {:get favicon-handler}]
+       ["/theme-init.js"      {:get theme-js-handler}]
+       ["/tailwind-config.js" {:get tailwind-cfg-handler}]
        ;; .ico left as 204 — modern browsers follow the <link rel="icon"
        ;; type="image/svg+xml"> in <head> and never hit /favicon.ico.
        ["/favicon.ico" {:get (fn [_] {:status 204 :body ""})}]
@@ -559,6 +606,7 @@
          ["/nodes/:node-id"      {:get  (node-detail-handler run-store)}]
          ["/iterations/:n"       {:get  (iteration-detail-handler run-store)}]]]
        ["/wiggum"
-        ["" {:post (start-wiggum-handler run-store)}]]])
+        ["" {:post (start-wiggum-handler run-store)}]]
+       ["/internal/launch" {:get (launch-handler run-store)}]])
     (ring/create-default-handler)
     {:middleware [params/wrap-params]}))

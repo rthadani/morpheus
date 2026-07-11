@@ -14,6 +14,7 @@
    [clojure.core.async  :as async]
    [clojure.java.shell  :as shell]
    [clojure.tools.cli   :refer [parse-opts]]
+   [org.httpkit.client  :as http-client]
    [morpheus.executor.engine  :as engine]
    [morpheus.executor.wiggum  :as wiggum]
    [morpheus.executor.store   :as store]
@@ -152,7 +153,8 @@
 (defn- prompt! [msg]
   (print (str msg ": "))
   (flush)
-  (keyword (str/trim (or (read-line) "abort"))))
+  (let [s (str/trim (or (read-line) "abort"))]
+    (keyword (if (str/blank? s) "abort" s))))
 
 (defn- event-loop!
   "Blocks consuming events from a tap on (:event-mult run). Using a tap (not
@@ -299,6 +301,29 @@
         (println (str "  " cmd " --view --project-dir /tmp/todo-react"))
         (println (str "  " cmd " --polish-only --project-dir /tmp/todo-react")))
 
+(defn- server-running? [port]
+  (try
+    (with-open [_ (java.net.Socket. "localhost" (int port))]
+      true)
+    (catch Exception _ false)))
+
+(defn- launch-via-server! [port {:keys [edn-file project-dir step max-iterations description]}]
+  (let [params (cond-> {}
+                 edn-file       (assoc "edn-file" edn-file)
+                 project-dir    (assoc "project-dir" project-dir)
+                 step           (assoc "step" "true")
+                 max-iterations (assoc "max-iterations" (str max-iterations))
+                 description    (assoc "description" description))
+        resp   @(http-client/get (str "http://localhost:" port "/internal/launch")
+                                 {:query-params params :timeout 10000})]
+    (println "Launch response status:" (:status resp) "body:" (:body resp))
+    (if (= 200 (:status resp))
+      (let [run-id (str/trim (:body resp))]
+        (println (str "UI: http://localhost:" port "/runs/" run-id))
+        true)
+      (do (println (str "Remote launch failed: " (:body resp)))
+          false))))
+
 (defn -main [& args]
   (let [{:keys [edn-file project-dir step max-iterations
                 view fresh polish polish-only help description]
@@ -335,6 +360,12 @@
           (do (println (str "No saved UI state found in " project-dir))
               (sys/stop!)
               (System/exit 1)))))
+
+    (let [port (or (some-> (System/getenv "PORT") parse-long) 7777)]
+      (when (and edn-file (server-running? port))
+        (let [ok (launch-via-server! port (assoc opts :edn-file edn-file))]
+          (shutdown-agents)
+          (System/exit (if ok 0 1)))))
 
     (let [raw   (edn/read-string (slurp edn-file))
           rtype (detect-type raw)
@@ -373,10 +404,13 @@
 
                         :dag
                         (engine/execute! run-id cfg
-                          (cond-> {}
+                          (cond-> {:morpheus.executor/run-store run-store}
                             project-dir
                             (assoc :graph/params
-                                   (assoc (:graph/params cfg {}) :project-dir project-dir)))))
+                                   (assoc (:graph/params cfg {}) :project-dir project-dir))
+                            description
+                            (assoc :describe/output description))
+                          (if description {:describe :done} {})))
 
             _         (store/add-run! run-store run)
             _         (println (str "UI: http://localhost:" port "/runs/" run-id))
