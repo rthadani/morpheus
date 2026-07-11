@@ -9,6 +9,7 @@
     :checkpoint    ; suspends execution, waits for human action
     :graph-expand  ; calls expand-fn to splice new nodes into the live graph
     :subgraph      ; runs a nested graph
+    :wiggum        ; runs a Wiggum loop
     :shell         ; shell command
     :http})        ; http request
 

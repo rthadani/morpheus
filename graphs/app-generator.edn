@@ -1,0 +1,27 @@
+;; Three-node app generator pipeline:
+;;   describe (checkpoint) -> generate-spec (wiggum) -> build-app (wiggum)
+;;
+;; Usage:
+;;   clj -M:run graphs/app-generator.edn --project-dir /path/to/new/project
+
+{:graph/id :app-generator
+ :graph/nodes
+ [{:id         :describe
+   :type       :checkpoint
+   :output-key :describe/output}
+
+  {:id              :generate-spec
+   :type            :wiggum
+   :depends-on      [:describe]
+   :run-config-file "graphs/spec-generator.edn"
+   :inputs          {:description [:describe/output]}
+   :output-file     "output"
+   :output-key      :generate-spec/spec}
+
+  {:id                    :build-app
+   :type                  :wiggum
+   :depends-on            [:generate-spec]
+   :run-config-from-input :spec
+   :inputs                {:spec        [:generate-spec/spec]
+                           :project-dir [:graph/params :project-dir]}
+   :output-key            :build-app/result}]}

@@ -91,6 +91,21 @@
            [:span {:id "live-output" :hx-swap-oob "beforeend"}
             (:line event)]))
 
+    :wiggum-started
+    (let [node-id    (name (:node-id event))
+          sub-run-id (:sub-run-id event)
+          href       (str "/runs/" sub-run-id)]
+      (str (h/html
+             [:div#node-output.node-output
+              {:hx-swap-oob "outerHTML:#node-output"}
+              [:div.detail-label [:span (str node-id " running")]]
+              [:div.subrun-link-box
+               [:a.subrun-link {:href href :target "_blank" :rel "noopener"}
+                "Open sub-run"]]])
+           (h/html
+             [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+              (ui/log-line :info (str node-id " started " sub-run-id))])))
+
     :node-error
     (str (h/html
            [:div {:id "log-lines" :hx-swap-oob "beforeend"}

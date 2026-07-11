@@ -4,6 +4,8 @@
    are handled in-process."
   (:require
    [clojure.core.async          :as async]
+   [clojure.edn                 :as edn]
+   [clojure.java.io             :as io]
    [clojure.string              :as str]
    [taoensso.timbre             :as log]
    [org.httpkit.client          :as http]
@@ -238,6 +240,54 @@
                              (clojure.data.json/write-str
                                (ctx/render-prompt (str (:body node)) inputs)))})]
     {:body (:body resp) :status (:status resp)}))
+
+(defn- scan-output-dir [work-dir]
+  (let [out-dir (io/file work-dir "output")]
+    (when (.isDirectory out-dir)
+      (let [edns (->> (.listFiles out-dir)
+                      (filter #(str/ends-with? (.getName %) ".edn"))
+                      (sort-by #(.lastModified %) >))]
+        (when (seq edns)
+          (edn/read-string (slurp (first edns))))))))
+
+(defmethod execute-node! :wiggum
+  [node inputs _context _graph-atom event-ch]
+  (log/info "Wiggum node" (:id node))
+  (let [execute!   (requiring-resolve 'morpheus.executor.wiggum/execute!)
+        from-input (:run-config-from-input node)
+        base-cfg   (cond
+                     from-input
+                     (get inputs from-input)
+
+                     (:run-config-file node)
+                     (edn/read-string (slurp (:run-config-file node)))
+
+                     (:run-config node)
+                     (:run-config node)
+
+                     :else {})
+        extra      (cond-> inputs from-input (dissoc from-input))
+        run-config (merge base-cfg extra)
+        run-id     (str (name (:id node)) "-" (System/currentTimeMillis))
+        sub-run    (execute! run-id run-config)]
+    (async/put! event-ch {:type       :wiggum-started
+                          :node-id    (:id node)
+                          :sub-run-id run-id})
+    (loop []
+      (let [s @(:state sub-run)]
+        (case s
+          :done
+          (let [work-dir @(:work-dir sub-run)]
+            (if (= "output" (:output-file node))
+              (or (scan-output-dir work-dir)
+                  {:work-dir work-dir :state :done})
+              {:work-dir work-dir :state :done}))
+
+          (:error :aborted)
+          (throw (ex-info "Wiggum sub-run did not complete"
+                          {:node (:id node) :state s}))
+
+          (do (Thread/sleep 500) (recur)))))))
 
 (defmethod execute-node! :default
   [node _ _ _ _]

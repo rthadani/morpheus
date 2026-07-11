@@ -94,6 +94,12 @@
               (case (:action action)
                 :approve
                 (do
+                  (when-let [fb (not-empty (:feedback action))]
+                    (let [node-id   (:node-id action)
+                          all-nodes (topo/topo-sort (:graph/nodes @(:graph-atom run)))
+                          node      (get (topo/node-map all-nodes) node-id)]
+                      (when-let [ok (:output-key node)]
+                        (swap! (:context run) ctx/store-output ok fb))))
                   (set-state! run (:node-id action) :done)
                   (recur))
 
@@ -112,7 +118,7 @@
             (do
               (doseq [node runnable]
                 (set-state! run (:id node) :running)
-                (go
+                (async/thread
                   (let [result (run-node! run node)]
                     (set-state! run (:id node) result))))
               (<! (async/timeout 50))
