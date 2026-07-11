@@ -44,7 +44,9 @@
                         node)
         _             (when output-buffers
                         (swap! output-buffers assoc (:id node) ""))
-        ctx-with-buf  (assoc @context ::output-buffers output-buffers)
+        ctx-with-buf  (assoc @context
+                              ::output-buffers output-buffers
+                              :morpheus.executor/event-log (:event-log run))
         resolved      (ctx/resolve-inputs (:inputs node {}) ctx-with-buf)
         steer         (first (swap-vals! (:steer-buffer run) (constantly nil)))
         ctx-final     (if steer (assoc ctx-with-buf ::steer steer) ctx-with-buf)
@@ -65,7 +67,8 @@
         (log/error e "Node failed" (:id node))
         (emit! run {:type    :node-error
                     :node-id (:id node)
-                    :message (ex-message e)})
+                    :message (ex-message e)
+                    :data    (ex-data e)})
         :error))))
 
 (defn execute!

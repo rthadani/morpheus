@@ -122,24 +122,24 @@
   `:executor-model-config 'claude-sonnet-4-6'` is wrong and the judge will
   fail the spec.  Use this table:
 
-  ┌────────────┬──────────┬─────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────┐
-  │ Provider   │ Complex  │ :executor-model-config                                  │ :supervisor-model-config                                 │
-  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
-  │ :anthropic │ SIMPLE   │ {:model-id 'claude-haiku-4-5-20251001'}                 │ {:model-id 'claude-sonnet-4-6'}                          │
-  │ :anthropic │ MEDIUM   │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-sonnet-4-6'}                          │
-  │ :anthropic │ COMPLEX  │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-opus-4-7'}                            │
-  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
-  │ :ollama    │ SIMPLE   │ {:provider :ollama :model-id 'qwen2.5-coder:7b'}        │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}        │
-  │ :ollama    │ MEDIUM   │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}        │
-  │ :ollama    │ COMPLEX  │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}        │
-  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
-  │ :kimi      │ ANY      │ {:provider :kimi :model-id 'kimi-k2.5'}                 │ {:provider :kimi :model-id 'kimi-k2.5'}                  │
-  │ :minimax   │ ANY      │ {:provider :minimax :model-id 'MiniMax-M2.7'}           │ {:provider :minimax :model-id 'MiniMax-M2.7'}            │
-  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
-  │ :pi        │ SIMPLE   │ {:agent :pi :provider :kimi :model-id 'kimi-k2.5'}      │ {:agent :pi :provider :deepseek :model-id 'deepseek-chat'}   │
-  │ :pi        │ MEDIUM   │ {:agent :pi :provider :kimi :model-id 'kimi-k2.6'}      │ {:agent :pi :provider :kimi :model-id 'kimi-k2.5'}       │
-  │ :pi        │ COMPLEX  │ {:agent :pi :provider :kimi :model-id 'kimi-k2.6'}      │ {:agent :pi :provider :minimax :model-id 'MiniMax-M2.7'} │
-  └────────────┴──────────┴─────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────┘
+  ┌────────────┬──────────┬─────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────────┐
+  │ Provider   │ Complex  │ :executor-model-config                                  │ :supervisor-model-config                                  │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ :anthropic │ SIMPLE   │ {:model-id 'claude-haiku-4-5-20251001'}                 │ {:model-id 'claude-sonnet-4-6'}                           │
+  │ :anthropic │ MEDIUM   │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-sonnet-4-6'}                           │
+  │ :anthropic │ COMPLEX  │ {:model-id 'claude-sonnet-4-6'}                         │ {:model-id 'claude-opus-4-7'}                             │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ :ollama    │ SIMPLE   │ {:provider :ollama :model-id 'qwen2.5-coder:7b'}        │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}         │
+  │ :ollama    │ MEDIUM   │ {:provider :ollama :model-id 'qwen2.5-coder:14b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}         │
+  │ :ollama    │ COMPLEX  │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}       │ {:provider :ollama :model-id 'qwen2.5-coder:32b'}         │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ :kimi      │ ANY      │ {:provider :kimi :model-id 'kimi-k2.5'}                 │ {:provider :kimi :model-id 'kimi-k2.5'}                   │
+  │ :minimax   │ ANY      │ {:provider :minimax :model-id 'MiniMax-M2.7'}           │ {:provider :minimax :model-id 'MiniMax-M2.7'}             │
+  ├────────────┼──────────┼─────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ :pi        │ SIMPLE   │ {:agent :pi :provider :moonshotai :model-id 'kimi-k2.5'}│ {:agent :pi :provider :deepseek :model-id 'deepseek-chat'}│
+  │ :pi        │ MEDIUM   │ {:agent :pi :provider :moonshotai :model-id 'kimi-k2.6'}│ {:agent :pi :provider :minimax :model-id 'MiniMax-M2.7'}  │
+  │ :pi        │ COMPLEX  │ {:agent :pi :provider :moonshotai :model-id 'kimi-k2.6'}│ {:agent :pi :provider :zai :model-id 'glm-5.2'}           │
+  └────────────┴──────────┴─────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────┘
 
   The Anthropic-compatible providers (:kimi :minimax) don't publish a
   meaningful size ladder we can map to complexity — pick the flagship

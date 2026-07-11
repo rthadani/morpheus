@@ -117,11 +117,22 @@
     (println (str "  polish skipped — " (name (:reason event))
                   (when-let [m (:message event)] (str ": " m))))
 
+    :wiggum-started
+    (let [port (or (some-> (System/getenv "PORT") parse-long) 7777)]
+      (println (str "  sub-run " (name (:node-id event)) ": " (:sub-run-id event)))
+      (println (str "  UI:      http://localhost:" port "/runs/" (:sub-run-id event))))
+
     :node-complete
     (println (str "  done " (name (:node-id event)) " (" (:duration event) "ms)"))
 
     :node-error
-    (println (str "  fail " (name (:node-id event)) " - " (:message event)))
+    (let [port (or (some-> (System/getenv "PORT") parse-long) 7777)
+          d    (:data event)]
+      (println (str "  fail " (name (:node-id event)) " - " (:message event)))
+      (when-let [sid (:sub-run-id d)]
+        (println (str "  sub-run: http://localhost:" port "/runs/" sid)))
+      (when-let [cmd (:rerun d)]
+        (println (str "  rerun:   " cmd))))
 
     :checkpoint
     (println (str "\nCheckpoint: " (name (:node-id event))))

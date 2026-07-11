@@ -46,19 +46,10 @@
        result))
     (str/trim (:out result))))
 
-(defn- complete-default [cfg prompt] (run-pi! cfg prompt))
-(defn- complete-google   [cfg prompt] (run-pi! (assoc cfg :provider :google)    prompt))
-(defn- complete-openai   [cfg prompt] (run-pi! (assoc cfg :provider :openai)    prompt))
-(defn- complete-anthropic [cfg prompt] (run-pi! (assoc cfg :provider :anthropic) prompt))
-(defn- complete-kimi     [cfg prompt] (run-pi! (assoc cfg :provider :moonshotai)      prompt))
-(defn- complete-minimax  [cfg prompt] (run-pi! (assoc cfg :provider :minimax)   prompt))
-(defn- complete-ollama   [cfg prompt] (run-pi! (assoc cfg :provider :ollama)    prompt))
-
 (defn complete
-  "Calls `pi -p`, routing to a provider-specific implementation.
+  "Calls `pi -p` with whatever provider/model-id is in model-config.
    model-config keys:
-     :provider  – pi provider name (:google, :openai, :anthropic,
-                   :kimi, :minimax, :ollama, or nil for default)
+     :provider  – passed directly to pi --provider (no translation)
      :model-id  – model pattern or ID
      :system    – system prompt string
      :api-key   – API key string (optional; env vars preferred)
@@ -70,14 +61,7 @@
   (log/debug "Pi agent call" {:provider (or provider :default)
                               :model    model-id
                               :prompt-chars (count prompt)})
-  (case provider
-    :google     (complete-google    model-config prompt)
-    :openai     (complete-openai    model-config prompt)
-    :anthropic  (complete-anthropic model-config prompt)
-    :kimi       (complete-kimi      model-config prompt)
-    :minimax    (complete-minimax   model-config prompt)
-    :ollama     (complete-ollama    model-config prompt)
-    (complete-default model-config prompt)))
+  (run-pi! model-config prompt))
 
 ;; ---------------------------------------------------------------------------
 ;; JSON helper (for llm/complete-json dispatch)

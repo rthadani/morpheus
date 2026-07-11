@@ -110,10 +110,21 @@
               (ui/log-line :info (str node-id " started " sub-run-id))])))
 
     :node-error
-    (str (h/html
-           [:div {:id "log-lines" :hx-swap-oob "beforeend"}
-            (ui/log-line :err (str "✗ " (name (:node-id event))
-                                   " — " (:message event)))]))
+    (let [d (:data event)]
+      (str (h/html
+             [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+              (ui/log-line :err (str "✗ " (name (:node-id event))
+                                     " — " (:message event)))])
+           (when-let [sid (:sub-run-id d)]
+             (h/html
+               [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+                (ui/log-line :err
+                             [:span "sub-run → "
+                              [:a {:href (str "/runs/" sid) :target "_blank"} sid]])]))
+           (when-let [cmd (:rerun d)]
+             (h/html
+               [:div {:id "log-lines" :hx-swap-oob "beforeend"}
+                (ui/log-line :err [:span "rerun: " [:code cmd]])]))))
 
     :steer-queued
     (let [text (:text event "")]

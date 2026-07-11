@@ -15,7 +15,8 @@
    [morpheus.executor.pi-agent  :as pi]
    [morpheus.executor.store     :as store]
    [morpheus.graph.context      :as ctx]
-   [morpheus.graph.topo         :as topo]))
+   [morpheus.graph.topo         :as topo]
+   [morpheus.slug               :as slug]))
 
 (def checkpoint-sentinel ::checkpoint)
 
@@ -251,6 +252,19 @@
         (when (seq edns)
           (edn/read-string (slurp (first edns))))))))
 
+(defn- spec-project-dir
+  "Derives a stable ~/.morpheus/specs/<node>-<desc-slug>/ path so wiggum
+   sub-runs without an explicit project-dir still write a snapshot and are
+   resumable on failure."
+  [node-id description]
+  (let [desc-slug (some-> description
+                          (subs 0 (min 60 (count description)))
+                          slug/slugify)
+        dir-name  (str/join "-" (filter some? [(name node-id) desc-slug]))
+        path      (str (System/getProperty "user.home") "/.morpheus/specs/" dir-name)]
+    (.mkdirs (io/file path))
+    path))
+
 (defmethod execute-node! :wiggum
   [node inputs context _graph-atom event-ch]
   (log/info "Wiggum node" (:id node))
@@ -268,14 +282,33 @@
 
                      :else {})
         extra      (cond-> inputs from-input (dissoc from-input))
-        run-config (merge base-cfg extra)
-        run-id     (str (name (:id node)) "-" (System/currentTimeMillis))
+        merged     (merge base-cfg extra)
+        run-config (if (:project-dir merged)
+                     merged
+                     (assoc merged :project-dir
+                            (spec-project-dir (:id node) (:description merged))))
+        ;; For dynamic configs (run-config-from-input), write the merged EDN to
+        ;; ~/.morpheus/specs/<project-slug>.edn so the rerun command is usable.
+        spec-file  (or (:run-config-file node)
+                       (when (and from-input (:project-dir run-config))
+                         (let [f (io/file (System/getProperty "user.home")
+                                          ".morpheus" "specs"
+                                          (str (slug/project-slug (:project-dir run-config))
+                                               ".edn"))]
+                           (.mkdirs (.getParentFile f))
+                           (spit f (pr-str run-config))
+                           (.getAbsolutePath f))))
+        run-id     (or (slug/project-slug (:project-dir run-config))
+                       (str (name (:id node)) "-" (System/currentTimeMillis)))
         sub-run    (execute! run-id run-config)]
     (when-let [rs (:morpheus.executor/run-store context)]
       (store/add-run! rs sub-run))
-    (async/put! event-ch {:type       :wiggum-started
-                          :node-id    (:id node)
-                          :sub-run-id run-id})
+    (let [started-event {:type       :wiggum-started
+                         :node-id    (:id node)
+                         :sub-run-id run-id}]
+      (when-let [elog (:morpheus.executor/event-log context)]
+        (swap! elog conj started-event))
+      (async/put! event-ch started-event))
     (loop []
       (let [s @(:state sub-run)]
         (case s
@@ -287,8 +320,21 @@
               {:work-dir work-dir :state :done}))
 
           (:error :aborted)
-          (throw (ex-info "Wiggum sub-run did not complete"
-                          {:node (:id node) :state s}))
+          (let [work-dir (try @(:work-dir sub-run) (catch Exception _ nil))
+                rerun    (when spec-file
+                           (str/join " "
+                             (cond-> ["clj -M:run" spec-file
+                                      "--project-dir" (:project-dir run-config)]
+                               (:description run-config)
+                               (into ["--description"
+                                      (str "\"" (:description run-config) "\"")])
+                               )))]
+            (throw (ex-info "Wiggum sub-run did not complete"
+                            {:node       (:id node)
+                             :state      s
+                             :sub-run-id run-id
+                             :work-dir   work-dir
+                             :rerun      rerun})))
 
           (do (Thread/sleep 500) (recur)))))))
 
