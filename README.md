@@ -44,6 +44,43 @@ graphs/examples/pi-kanban-fullstack.edn      (pi executor)
 
 Use this when you want the system to handle decomposition and course-correction autonomously.
 
+### Spec generator
+
+Before writing a Wiggum spec by hand, run `graphs/spec-generator.edn` to generate one from a plain-English description. It is itself a Wiggum loop that produces a ready-to-run EDN file.
+
+**1. Edit the `:description` field in `graphs/spec-generator.edn`:**
+
+```clojure
+{:description
+ "A Kafka consumer lag monitor dashboard in React + Node.js :kimi"}
+```
+
+One line for SIMPLE/MEDIUM; a full paragraph for COMPLEX. Append an optional provider/agent keyword at the end — the generator strips it from the slug but uses it for model selection:
+
+| Suffix       | Routes through                                         | Required env        |
+|--------------|--------------------------------------------------------|---------------------|
+| (none)       | claude CLI → Anthropic                                 | `ANTHROPIC_API_KEY` |
+| `:kimi`      | claude CLI → api.moonshot.ai                           | `MOONSHOT_API_KEY`  |
+| `:minimax`   | claude CLI → api.minimax.chat                          | `MINIMAX_API_KEY`   |
+| `:ollama`    | claude CLI → local Ollama                              | none                |
+| `:pi`        | pi CLI (executor: kimi-k2.x; supervisor varies)        | `MOONSHOT_API_KEY` + others |
+
+**2. Run it:**
+
+```bash
+clj -M:run graphs/spec-generator.edn --project-dir ./spec-out
+```
+
+**3. Review and run the output:**
+
+```bash
+# Generated spec is in spec-out/output/<slug>.edn
+# Review it, then run:
+clj -M:run spec-out/output/<slug>.edn --project-dir /path/to/your/project
+```
+
+The generator's four phases — analyse the description, select models, write the spec, validate it — are all run by Claude Code autonomously. The output spec includes a tuned `:objective` with `=== Phase N: name ===` headings, `Deliverables:` blocks, `:success-check`, `:constraints`, `:anti-goals`, `:judge-mode`, `:review-threshold`, and model configs matched to the complexity and provider you chose.
+
 ## Running
 
 ### Prerequisites
