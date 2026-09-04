@@ -12,8 +12,8 @@
 ;;        'A CLI tool that watches a directory and prints new file summaries'
 ;;        'An HTMX todo app in Clojure with SQLite :ollama'
 ;;        'A Kafka consumer lag monitor dashboard :kimi'
-;;        'A Clojure TUI options-trading research workbench backed by
-;;         IBKR + DuckDB + Claude Code as agent (see options-trader.edn). :pi'
+;;        'A Clojure TUI for monitoring Kafka consumer lag across topics,
+;;         backed by DuckDB for historical storage and Prometheus for alerts. :pi'
 ;;   2. Provider env vars (must be set if non-default):
 ;;        :kimi    MOONSHOT_API_KEY
 ;;        :minimax MINIMAX_API_KEY
@@ -230,11 +230,8 @@
             domain-specific and exhaustive (15-25 of each is normal,
             not too many). :acceptance-criteria is mandatory and must
             include real shell commands gating phase advancement against
-            real data — not just `clojure -M:test`. The reference for
-            COMPLEX is `graphs/options-trader/options-trader.edn` in
-            this repo: read it before writing a COMPLEX spec. Match its
-            level of detail; do not produce a thin sketch and call it
-            done.
+            real data — not just `clojure -M:test`. Do not produce a
+            thin sketch and call it done.
 
   Under-detailing a COMPLEX spec is a defect. The supervisor will run
   fewer iterations against a thin spec because each iteration's
@@ -299,9 +296,8 @@
                           the kind of UI:
                             web/HTML        → output/mockup.html
                             terminal/TUI    → output/mockup.txt (ASCII
-                                              layout boxes, like the panes
-                                              shown in options-trader.edn
-                                              Phase 7)
+                                              layout boxes showing each
+                                              pane, border, and label)
                             CLI w/ output   → output/expected-session.txt
                                               (sample command + expected
                                               stdout transcript)
@@ -528,8 +524,8 @@
                               For Clojure maps, JSON examples, Maven
                               coordinates: use single-quoted 'literals'
                               or backtick `code` style instead.
-                              The options-trader.edn :tui block is the
-                              model.
+                              Use single-quoted 'literals' or backtick
+                              `code` style for any embedded code.
                             * Bare `\\` followed by a newline is NOT a
                               valid EDN escape — the strict reader fails
                               with `Unsupported escape character: \\`.
@@ -731,11 +727,14 @@
        grep -q '^ :acceptance-criteria' output/<slug>.edn
      For COMPLEX add:
        grep -q '^ :checkpoint-every'    output/<slug>.edn
-  4. If description implies a UI, exactly one visual artifact must be
+  4. Write the slug to a sentinel file so the morpheus success-check can
+     locate the spec without guessing:
+       echo 'output/<slug>.edn' > output/.last-spec
+  5. If description implies a UI, exactly one visual artifact must be
      declared:
        grep -qE 'output/(mockup\\.html|mockup\\.txt|expected-session\\.txt)' output/<slug>.edn
        grep -q 'Visual reference' output/<slug>.edn
-  5. Anti-pattern checks — all must be absent:
+  6. Anti-pattern checks — all must be absent:
        ! grep -q 'kill $SERVER_PID'            output/<slug>.edn
        ! grep -qE ':temperature|:max-tokens|:auth-token-env' output/<slug>.edn  ; dead keys
        ! grep -qE 'color: *#|border-radius: *[0-9]|font-size: *[0-9]' output/<slug>.edn
@@ -751,14 +750,14 @@
        ! awk '/^ :success-check/,/^[^ ]/' output/<slug>.edn | grep -qE 'setsid|fuser|nohup|docker (build|run)'
                                   ; live smoke-test commands forbidden in
                                   ; per-iteration :success-check
-  6. Context-window budget check — must pass:
+  7. Context-window budget check — must pass:
        OBJ_LEN=$(clojure -e '(count (:objective (clojure.edn/read-string (slurp \"output/<slug>.edn\"))))')
        test $OBJ_LEN -le 12000   ; under 12K chars total
      If this fails, the spec must be rewritten to lift detail into
      deliverable files; do not just trim prose to squeeze under the cap
      while leaving the structure unchanged.
 
-  7. Tests-are-required check — :success-check must include a test
+  8. Tests-are-required check — :success-check must include a test
      invocation, not just file existence:
        awk '/^ :success-check/,/^[^ ]/' output/<slug>.edn \\
          | grep -qvE '^[[:space:]]*\"[[:space:]]*$' \\
@@ -768,7 +767,7 @@
      actually exercised.  A spec whose :success-check is purely
      `test -f` checks must be rejected.
 
-  8. Print summary line:
+  9. Print summary line:
        Spec written: output/<slug>.edn
        Provider: <provider>  Complexity: <complexity>
        Judge mode: <code|research>  Review threshold: <high|medium|low>
@@ -778,9 +777,9 @@
 
   === Reference spec — SIMPLE/MEDIUM (study the style — match it exactly) ===
 
-  This is the model for SIMPLE/MEDIUM specs. For COMPLEX, also study
-  graphs/options-trader/options-trader.edn in this repo — that file is
-  the model for the depth and breadth a COMPLEX spec must reach.
+  This is the model for SIMPLE/MEDIUM specs. For COMPLEX, apply the
+  depth rules above (1000-4000 lines, every namespace enumerated, etc.)
+  using this Kanban spec as a structural template scaled up.
 
   {:objective
    'Build a full-stack Kanban board application.
@@ -934,9 +933,10 @@
  :project-dir nil
 
  :success-check
- "test -d output &&
-  SPEC=$(ls -t output/*.edn | head -1) &&
+ "test -f output/.last-spec &&
+  SPEC=$(cat output/.last-spec) &&
   test -n \"$SPEC\" &&
+  test -f \"$SPEC\" &&
   clojure -e \"(clojure.edn/read-string (slurp \\\"$SPEC\\\"))\" &&
   grep -q '^ :objective'           $SPEC &&
   grep -q '^ :success-check'       $SPEC &&
@@ -972,10 +972,11 @@
   "Every output spec must declare :judge-mode (:code or :research) and :review-threshold (:low :medium or :high) so the downstream Wiggum run uses the right reviewer rubric"
   "Pick :judge-mode :research only when the deliverable is written analysis with citations (briefings, due diligence, literature reviews); pick :judge-mode :code for everything that produces source code, even if the project also has a writeup phase"
   "For :judge-mode :research default :review-threshold to :medium (citation discipline is brittle); for :judge-mode :code default to :high"
-  "COMPLEX outputs must reach the depth of graphs/options-trader/options-trader.edn — every namespace, every column, every test fixture enumerated; thin sketches are a defect"
+  "COMPLEX outputs must reach 1000-4000 lines with every namespace, every public function, every database column, and every test fixture enumerated — thin sketches are a defect"
   "COMPLEX outputs must include :checkpoint-every (max-iterations / 5, ceil)"
   "The output file must parse as valid EDN via clojure.edn/read-string (strict) before declaring done"
   "Create the output/ directory if it does not exist"
+  "After writing the spec, write the relative path `output/<slug>.edn` to `output/.last-spec` (Phase 4 step 4) — the morpheus success-check reads this sentinel to locate the spec; `ls -t output/*.edn | head -1` picks stale files and must not be used"
   "Every phase header in the output spec must open with a `Deliverables:` block listing concrete file paths (or routes/functions for phases that flesh out an existing file) — the supervisor lifts this list straight into per-iteration expected_files"
   "The output spec's :success-check must be a single `&&`/`\\` continuation chain with no trailing prose, Note: blocks, or blank-line-separated comments — `sh -c` parses any non-continuation line as a separate command and the exit code becomes the last line (typically 127), so a poisoned check can never report success"
   "The output spec's :success-check is per-iteration: file existence (`test -f path`) plus an invocation of the project's native test runner — pick the idiomatic command for the chosen stack rather than prescribing one.  Never include `setsid`, `fuser`, `nohup`, port probes, `curl` to localhost, `docker build`, or `docker run` (Darwin lacks setsid/fuser, and live smoke-tests are too flaky for the per-iteration cycle)"
