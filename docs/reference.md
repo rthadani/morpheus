@@ -1,14 +1,77 @@
 # Morpheus — reference
 
+## CLI reference
+
+```
+clj -M:run <graph.edn> [options]
+```
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--project-dir PATH` | `-p` | Directory where the agent writes output files. Required for most runs. |
+| `--step` | | Pause after every iteration (step mode). Toggle back to auto in the UI. |
+| `--max-iterations N` | | Hard cap on iterations. Overrides the value in the EDN file. |
+| `--fresh` | | Delete the cached work-dir and start from scratch. |
+| `--view` | | Show the saved UI state for a previous run without starting a new one. Pass the same `--project-dir` as the original run. |
+| `--polish` | | Run a polish pass at the end of a verified run to back-fill WHY comments. |
+| `--polish-only` | | Run a standalone polish pass on an already-built project. Requires `--project-dir`. |
+| `--agent AGENT` | | Executor agent: `claude` (default) or `pi`. |
+| `--description DESC` | | Description string passed to the spec generator. Overrides `:description` in the EDN file. |
+| `--model MODEL` | | Override the model for both supervisor and executor. See model format below. |
+| `--supervisor-model MODEL` | | Override supervisor model only. |
+| `--executor-model MODEL` | | Override executor model only. |
+| `--help` | `-h` | Print help. |
+
+### Model format
+
+`--model`, `--supervisor-model`, and `--executor-model` accept `provider/model-id`:
+
+| Agent | Format | Examples |
+|-------|--------|---------|
+| `--agent claude` (default) | `provider/model-id` | `claude/claude-sonnet-4-7`, `kimi/kimi-k2.6`, `ollama/qwen2.5-coder:32b` |
+| `--agent pi` | `provider/model-id` | `kimi/kimi-k2.6`, `google/gemini-3-flash-preview`, `minimax/MiniMax-M2.7` |
+
+Omitting the `provider/` prefix defaults to the Anthropic claude provider.
+
+### Common invocations
+
+```bash
+# Run a spec with a specific project dir
+clj -M:run output/my-app.edn --project-dir ./my-app
+
+# Generate a spec then run it
+clj -M:run graphs/spec-generator.edn --project-dir ./spec-out \
+  --description "A Kafka consumer lag monitor in React"
+clj -M:run spec-out/output/kafka-lag-monitor.edn --project-dir ./kafka-lag-monitor
+
+# Step through iterations one at a time
+clj -M:run output/my-app.edn --project-dir ./my-app --step
+
+# Resume a run after clearing stale state
+clj -M:run output/my-app.edn --project-dir ./my-app --fresh
+
+# Override models at the CLI (useful for quick cost experiments)
+clj -M:run output/my-app.edn --project-dir ./my-app \
+  --executor-model ollama/qwen2.5-coder:14b \
+  --supervisor-model claude/claude-sonnet-4-7
+
+# Pi executor with Kimi
+clj -M:run output/my-app.edn --project-dir ./my-app \
+  --agent pi --executor-model kimi/kimi-k2.6
+
+# Run a standalone polish pass on a finished project
+clj -M:run output/my-app.edn --polish-only --project-dir ./my-app
+```
+
 ## Wiggum config (full key reference)
 
 ```clojure
 {;; Core
  :objective          "Build a working X that does Y and Z."
- :project-dir        nil             ; copied into work-dir at start; set at runtime
- :success-check      "npm test"      ; shell command; exit 0 = done. Default "echo ok"
- :max-iterations     20              ; hard cap (default 20)
- :timeout-ms         300000          ; per-iteration agent timeout (default 5 min)
+ :project-dir        nil      ; copied into work-dir at start; set at runtime
+ :success-check      "npm test" ; shell cmd; exit 0 = done. Default "echo ok"
+ :max-iterations     20       ; hard cap (default 20)
+ :timeout-ms         300000   ; per-iteration agent timeout ms (default 5 min)
 
  ;; Phase constraints (initial values for the first control packet)
  :constraints        ["Write tests alongside implementation"]
@@ -18,25 +81,35 @@
  :acceptance-criteria nil
 
  ;; Model selection
- :model-config            nil   ; LLM for both executor and supervisor
- :executor-model-config   nil   ; overrides executor only
- :supervisor-model-config nil   ; overrides supervisor only
- :fallback-model          nil   ; model-id to retry on Anthropic rate-limit (claude agent only)
+ :model-config            nil  ; LLM for both executor and supervisor
+ :executor-model-config   nil  ; overrides executor only
+ :supervisor-model-config nil  ; overrides supervisor only
+ :fallback-model          nil  ; model-id to retry on rate-limit (claude only)
  :fallback-delay-ms       30000
 
  ;; Review / judge
- :judge-mode       :code   ; :code | :spec | :research
- :review-threshold :high   ; :none | :low | :medium | :high
+ :judge-mode       :code  ; :code | :research
+ :review-threshold :high  ; :none | :low | :medium | :high
 
  ;; Run behaviour
  :step-once?          false
- :checkpoint-every    nil
- :generate-claude-md? true
+ :checkpoint-every    nil   ; pause every N iterations for human review
+ :generate-claude-md? true  ; write CLAUDE.md into project after success
+
+ ;; Smoke pass — runs after verification, before polish
+ ;; Starts the app and exercises main flows end-to-end.
+ ;; On failure the run still finalises; fix manually.
+ :smoke-pass?         false
+ :smoke-max-retries   3     ; attempts before giving up (default 3)
+
+ ;; Polish pass — runs after smoke (or verification if smoke disabled)
+ ;; One extra CC pass to back-fill brief WHY comments on non-obvious code.
+ ;; Best-effort: quota/errors are logged and the run finalises regardless.
  :polish-pass?        false
 
  ;; Auto-steer (stuck-loop recovery)
  :auto-steer?      false
- :stuck-threshold  3}
+ :stuck-threshold  3}       ; consecutive verify failures before pivot
 ```
 
 ## Agents and providers
