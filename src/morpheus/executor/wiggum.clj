@@ -489,9 +489,10 @@
         ;; steps the supervisor produces (e.g. "kanban-full/src/" → "src/")
         proj-prefix   (some-> (get-in config [:project-dir])
                                io/file .getName)
-        judge-mode    (or (:judge-mode config) :code)]
+        judge-mode         (or (:judge-mode config) :code)
+        executor-claude-md (control-packet->claude-md control-packet current-top proj-prefix judge-mode)]
     (reset! (:live-output run) "")
-    (agent/write-claude-md! work-dir (control-packet->claude-md control-packet current-top proj-prefix judge-mode))
+    (agent/write-claude-md! work-dir executor-claude-md)
     (emit! run {:type           :iteration-started
                 :iteration      iteration
                 :work-dir       work-dir
@@ -553,8 +554,9 @@
                                 :files-written  (:files-written ev0)
                                 :files-edited   (:files-edited ev0)
                                 :files-deleted  (:files-deleted ev0)
-                                :success-check  (:success-check control-packet)
-                                :diff           (git-diff work-dir)}))
+                                :success-check      (:success-check control-packet)
+                                :executor-claude-md executor-claude-md
+                                :diff               (git-diff work-dir)}))
           ev               (assoc ev0
                                    ;; Per-iteration packet trail; the top-level
                                    ;; :control-packet only keeps the latest.

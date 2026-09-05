@@ -117,13 +117,19 @@
      "     they belong in the artifact, not in the prose."
      ""
      "6. Depth match"
-     "   * SIMPLE description  → spec ~50-150 lines."
-     "   * MEDIUM             → ~150-500 lines."
-     "   * COMPLEX            → ~1000+ lines, every namespace/column/test"
-     "     fixture enumerated. The reference for COMPLEX is"
-     "     graphs/options-trader/options-trader.edn — a thin sketch against a"
-     "     COMPLEX description is the most common failure mode and an automatic"
-     "     high-severity violation."
+     "   * SIMPLE description  → lean spec, one screen per phase."
+     "   * MEDIUM             → each phase names concrete files, routes, functions."
+     "   * COMPLEX            → every namespace listed, every public function named,"
+     "     every DB column enumerated, at least one test fixture per phase."
+     "     A thin sketch against a COMPLEX description is the most common failure"
+     "     mode and an automatic high-severity violation."
+     ""
+     "7. Executor CLAUDE.md contradictions (only when the executor context is provided)"
+     "   * Spec constraints or anti-goals must not contradict the executor's CLAUDE.md rules."
+     "   * Common contradictions: spec says 'add comments' but CLAUDE.md bans comments;"
+     "     spec says 'write docstrings' but CLAUDE.md forbids them; spec allows a pattern"
+     "     the CLAUDE.md explicitly prohibits (orphan atoms, defensive try/catch, etc.)."
+     "   * Flag each contradiction as type contradicts-constraint, severity high."
      ""
      "## Scoring"
      "- score: 0..10 (10 = ready to run; ≤4 = the spec is broken)."
@@ -241,7 +247,8 @@
 
 (defn- review-prompt
   [{:keys [mode objective expected-files expected-check constraints anti-goals
-           files-written files-edited files-deleted diff success-check]}]
+           files-written files-edited files-deleted diff success-check
+           executor-claude-md]}]
   (let [{:keys [system rubric max-diff-chars]}
         (get mode-config (or mode :code) (:code mode-config))
         present-set     (set (:present expected-check))
@@ -295,6 +302,12 @@
           (when (seq anti-goals)
             (str "## Anti-goals\n"
                  (str/join "\n" (map #(str "- " %) anti-goals))))
+
+          (when executor-claude-md
+            (str "## Executor CLAUDE.md (rules given to the code agent each iteration)\n"
+                 "Check spec constraints and anti-goals against these rules. "
+                 "Flag any contradiction as type contradicts-constraint, severity high.\n"
+                 "```\n" (truncate executor-claude-md 6000) "\n```"))
 
           (str "## Files the agent created this iteration (" (count files-written) ")\n"
                (if (seq files-written)

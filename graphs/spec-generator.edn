@@ -224,7 +224,7 @@
             functions, routes, and tests. :acceptance-criteria required
             with one shell-runnable check per phase.
 
-    COMPLEX ~1000-4000 lines. Each phase enumerates every namespace,
+    COMPLEX Each phase enumerates every namespace,
             every public function, every database column, every tool
             schema, every test fixture. Constraints and anti-goals are
             domain-specific and exhaustive (15-25 of each is normal,
@@ -778,7 +778,7 @@
   === Reference spec — SIMPLE/MEDIUM (study the style — match it exactly) ===
 
   This is the model for SIMPLE/MEDIUM specs. For COMPLEX, apply the
-  depth rules above (1000-4000 lines, every namespace enumerated, etc.)
+  depth rules above (every namespace, function, and column enumerated)
   using this Kanban spec as a structural template scaled up.
 
   {:objective
@@ -972,7 +972,7 @@
   "Every output spec must declare :judge-mode (:code or :research) and :review-threshold (:low :medium or :high) so the downstream Wiggum run uses the right reviewer rubric"
   "Pick :judge-mode :research only when the deliverable is written analysis with citations (briefings, due diligence, literature reviews); pick :judge-mode :code for everything that produces source code, even if the project also has a writeup phase"
   "For :judge-mode :research default :review-threshold to :medium (citation discipline is brittle); for :judge-mode :code default to :high"
-  "COMPLEX outputs must reach 1000-4000 lines with every namespace, every public function, every database column, and every test fixture enumerated — thin sketches are a defect"
+  "COMPLEX outputs must enumerate every namespace, every public function, every database column, and every test fixture — thin sketches that leave the executor to guess the schema are a defect"
   "COMPLEX outputs must include :checkpoint-every (max-iterations / 5, ceil)"
   "The output file must parse as valid EDN via clojure.edn/read-string (strict) before declaring done"
   "Create the output/ directory if it does not exist"
