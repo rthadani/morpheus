@@ -730,6 +730,92 @@
   4. Write the slug to a sentinel file so the morpheus success-check can
      locate the spec without guessing:
        echo 'output/<slug>.edn' > output/.last-spec
+  4b. Write output/how-to-run.md — a plain Markdown file that tells the
+      user how to run the generated application once wiggum has built it.
+      You already know the stack, entry points, ports, and env vars from
+      the spec you just wrote.  The file must contain exactly these sections,
+      filled in from the spec content:
+
+        ## Prerequisites
+        List every env var the app needs at runtime (not just the wiggum
+        provider keys — the app's own runtime vars: API keys, DB paths, ports).
+        List any system dependencies (docker, node, java, etc.) and versions.
+
+        ## Run the wiggum build
+        The exact command to generate the app from this spec:
+          clj -M:run output/<slug>.edn --project-dir ./output/<slug>
+        Substitute the real slug.
+
+        ## Start the app
+        The idiomatic start command for the generated stack, e.g.:
+          clj -M:run           (Clojure http-kit)
+          npm start / npm run dev  (Node)
+          python -m myapp      (Python)
+          ./target/myapp       (compiled binary)
+        Include the port or address it listens on if applicable.
+
+        ## Key endpoints / commands
+        For a server: list the main HTTP routes with one-line descriptions.
+        For a CLI: show two or three example invocations with realistic args.
+        For a library: show a minimal usage snippet.
+
+        ## Run the tests
+        The exact :success-check command from the spec (copy it verbatim).
+
+      Keep the file under 60 lines.  No marketing prose.  No placeholder
+      text — every section must be filled with specifics from the spec.
+      Verify the file exists:
+        test -f output/how-to-run.md
+
+  4c. Write output/stack.md — a plain Markdown file that specifies the
+      full technology stack chosen for this project.  Derive every entry
+      from the Phase 1 analysis and the spec you just wrote — do not
+      invent versions or libraries that are not in the spec.
+
+      The file must contain exactly these sections:
+
+        ## Language
+        Language name and pinned version (e.g. Clojure 1.12, Python 3.12,
+        Node 22, Go 1.23, Rust 1.78).  One line.
+
+        ## Runtime / Platform
+        JVM, CPython, V8, BEAM, etc.  Include the minimum version if
+        relevant.  Omit if the language section already covers it.
+
+        ## Framework
+        The top-level application framework (http-kit + reitit, FastAPI,
+        Express, Gin, Phoenix, Rails, Spring Boot, etc.).  One line per
+        framework, with the pinned version from the spec.
+
+        ## Persistence
+        Database or storage engine, driver/client library, and version.
+        If there is no persistence layer, write "none".
+
+        ## Key libraries
+        Bullet list: library name, version, one-line role.  Include only
+        libraries that appear in the spec's dependency list or are called
+        out by name in the objective.  Do not pad with standard-library
+        modules.
+
+        ## Test framework
+        The test runner and any assertion/mock libraries, with versions.
+
+        ## Build and tooling
+        Build tool (Leiningen, tools.deps, npm, cargo, go build, etc.),
+        linter, formatter, and any code-generation tools the project uses.
+
+        ## Rationale
+        One sentence per major technology choice explaining why that choice
+        fits this project over the obvious alternative.  Cover language,
+        framework, and persistence only — skip libraries whose choice is
+        obvious from the framework.
+
+      Keep the file under 80 lines.  Pin all versions that appear in the
+      spec.  For versions not yet fixed (because wiggum will resolve them
+      at build time), write the minimum constraint (e.g. >=3.10).
+      Verify the file exists:
+        test -f output/stack.md
+
   5. If description implies a UI, exactly one visual artifact must be
      declared:
        grep -qE 'output/(mockup\\.html|mockup\\.txt|expected-session\\.txt)' output/<slug>.edn
@@ -957,6 +1043,8 @@
   ! grep -qE 'color: *#|border-radius: *[0-9]|font-size: *[0-9]' $SPEC &&
   ! grep -q '<<<' $SPEC &&
   ! grep -q '^ :phases' $SPEC &&
+  test -f output/how-to-run.md &&
+  test -f output/stack.md &&
   echo OK"
 
  :constraints
@@ -977,6 +1065,8 @@
   "The output file must parse as valid EDN via clojure.edn/read-string (strict) before declaring done"
   "Create the output/ directory if it does not exist"
   "After writing the spec, write the relative path `output/<slug>.edn` to `output/.last-spec` (Phase 4 step 4) — the morpheus success-check reads this sentinel to locate the spec; `ls -t output/*.edn | head -1` picks stale files and must not be used"
+  "After writing the spec, also write `output/how-to-run.md` (Phase 4 step 4b) with the exact wiggum build command, runtime prerequisites, start command, key endpoints or example CLI invocations, and the verbatim :success-check — all derived from the spec you just wrote, not from placeholders"
+  "After writing the spec, also write `output/stack.md` (Phase 4 step 4c) listing the pinned language version, framework, persistence layer, key libraries with versions and roles, test framework, build tooling, and one-sentence rationale for each major choice — all derived from Phase 1 analysis and the spec, not invented"
   "Every phase header in the output spec must open with a `Deliverables:` block listing concrete file paths (or routes/functions for phases that flesh out an existing file) — the supervisor lifts this list straight into per-iteration expected_files"
   "The output spec's :success-check must be a single `&&`/`\\` continuation chain with no trailing prose, Note: blocks, or blank-line-separated comments — `sh -c` parses any non-continuation line as a separate command and the exit code becomes the last line (typically 127), so a poisoned check can never report success"
   "The output spec's :success-check is per-iteration: file existence (`test -f path`) plus an invocation of the project's native test runner — pick the idiomatic command for the chosen stack rather than prescribing one.  Never include `setsid`, `fuser`, `nohup`, port probes, `curl` to localhost, `docker build`, or `docker run` (Darwin lacks setsid/fuser, and live smoke-tests are too flaky for the per-iteration cycle)"
@@ -988,7 +1078,7 @@
  :anti-goals
  ["Do not invent model IDs not listed in the Phase 2 table"
   "Do not include the provider/agent keyword (:ollama :kimi :minimax :anthropic :pi) in the output spec slug or title"
-  "Do not produce anything other than the analysis and the single output EDN file"
+  "Do not produce anything other than the analysis, the output EDN spec, output/how-to-run.md, and output/stack.md"
   "Do not write placeholder values — every field must be fully filled in"
   "Do not wrap the EDN in markdown code fences — the file must be raw EDN"
   "Do not set :generate-claude-md? to true — this is a single-output spec, not a full project"

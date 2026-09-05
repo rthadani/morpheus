@@ -17,6 +17,16 @@
      :supervisor-model-config optional  — overrides for supervisor only
      :generate-claude-md?     optional  — write a project CLAUDE.md after success
                                           (default true; pass false to skip)
+     :smoke-pass?             optional  — when true, run CC passes after
+                                          verification that actually start the
+                                          app and exercise its main flows end
+                                          to end. Retries up to
+                                          :smoke-max-retries times; after all
+                                          attempts fail the run still finalises
+                                          so you can fix manually. Runs before
+                                          :polish-pass?. (default false)
+     :smoke-max-retries       optional  — max smoke attempts before giving up
+                                          and finalising anyway. (default 3)
      :polish-pass?            optional  — when true, run one extra CC pass after
                                           verification to back-fill brief WHY
                                           comments on non-obvious code. Best-
@@ -686,12 +696,109 @@
                   :message   (ex-message e)
                   :iteration iteration}))))
 
+(def ^:private smoke-claude-md
+  (str "> **Smoke pass — integration test only.**\n"
+       "> Unit tests have passed. Your job is to verify the application works\n"
+       "> end-to-end by actually starting it and exercising its main flows.\n"
+       ">\n"
+       "> Steps:\n"
+       "> 1. Read the project files to understand how to start the application.\n"
+       "> 2. Start the application (e.g. in the background with &, or via a\n"
+       ">    test harness). Wait for it to be ready.\n"
+       "> 3. Exercise the main user-facing flows — create, read, update, delete,\n"
+       ">    or whatever the app's core purpose is. Use curl, clj -e, or any\n"
+       ">    tool available in the environment.\n"
+       "> 4. If anything fails: fix the root cause in the source files and\n"
+       ">    re-verify. Do not patch around the failure.\n"
+       "> 5. When all flows work, stop. No preamble, no trailing summary.\n"
+       ">\n"
+       "> You must NOT change behaviour that is already correct, NOT add new\n"
+       "> features, NOT add or remove tests. Fix only what prevents the app\n"
+       "> from running or producing correct output.\n"))
+
+(defn run-smoke-pass!
+  "Integration smoke pass after unit-test verification. Retries up to
+   :smoke-max-retries times (default 3); each attempt is one CC session that
+   starts the app, exercises main flows, and fixes anything broken. After all
+   attempts are exhausted the run still finalises — the user can fix manually.
+   Public so a standalone CLI command can reuse it."
+  [run work-dir iteration]
+  (let [config     (:config run)
+        max-tries  (get config :smoke-max-retries 3)
+        timeout-ms (:timeout-ms config 300000)
+        exec-cfg   (or (:executor-model-config config)
+                       (:model-config config))
+        primary-model (:model-id exec-cfg)]
+    (loop [attempt 1]
+      (if (> attempt max-tries)
+        (do (log/warn "Smoke pass exhausted retries — finalising verified run anyway"
+                      {:attempts max-tries})
+            (emit! run {:type      :smoke-skipped
+                        :reason    :retries-exhausted
+                        :attempts  max-tries
+                        :iteration iteration}))
+        (do
+          (agent/write-claude-md! work-dir smoke-claude-md)
+          (emit! run {:type :smoke-started :iteration iteration :attempt attempt :max-tries max-tries})
+          (let [result (try
+                         (run-with-fallback!
+                           run
+                           {:work-dir     work-dir
+                            :prompt       (if (= attempt 1)
+                                            "Start the application and verify all main flows work end to end. Fix anything that prevents it from running."
+                                            (str "Smoke attempt " attempt " of " max-tries ". Previous attempt failed. Re-read the project, identify what went wrong, and fix it. Then re-verify all main flows."))
+                            :timeout-ms   timeout-ms
+                            :model        primary-model
+                            :model-config exec-cfg
+                            :on-output    (fn [line]
+                                            (swap! (:live-output run) str line)
+                                            (emit! run {:type      :output-line
+                                                        :iteration iteration
+                                                        :line      line}))}
+                           config)
+                         (catch Exception e
+                           {:exit 1 :error (ex-message e)}))]
+            (cond
+              (rate-limited? result)
+              (do (log/warn "Smoke pass quota-exhausted — skipping remaining attempts")
+                  (emit! run {:type      :smoke-skipped
+                              :reason    :exhausted
+                              :attempt   attempt
+                              :iteration iteration}))
+
+              (pos? (:exit result 0))
+              (do (log/warn "Smoke pass attempt failed" {:attempt attempt :max-tries max-tries :exit (:exit result)})
+                  (emit! run {:type      :smoke-attempt-failed
+                              :attempt   attempt
+                              :max-tries max-tries
+                              :exit      (:exit result)
+                              :iteration iteration})
+                  (recur (inc attempt)))
+
+              :else
+              (do (git-sh work-dir "add" "-A")
+                  (git-sh work-dir "commit" "-q" "--allow-empty"
+                          "-m" (str "iter-" iteration ": smoke pass (attempt " attempt ")"))
+                  (emit! run {:type :smoke-complete :iteration iteration :attempt attempt})))))))))
+
 (defn- finish-verified!
   "Shared exit-path for verified runs: commit the phase, optionally run the
-   polish pass, then finalise. The three places that transition to a
-   verified-done state share this so the polish-pass toggle stays consistent."
+   smoke pass, optionally run the polish pass, then finalise."
   [run run-config work-dir iteration commit-phase!]
   (commit-phase!)
+  (when (:smoke-pass? run-config)
+    (run-smoke-pass! run work-dir iteration))
+  (when (:polish-pass? run-config)
+    (run-polish-pass! run work-dir iteration))
+  (finish-run! run run-config work-dir :verified iteration))
+
+(defn- finish-verified!
+  "Shared exit-path for verified runs: commit the phase, optionally run the
+   smoke pass, optionally run the polish pass, then finalise."
+  [run run-config work-dir iteration commit-phase!]
+  (commit-phase!)
+  (when (:smoke-pass? run-config)
+    (run-smoke-pass! run work-dir iteration))
   (when (:polish-pass? run-config)
     (run-polish-pass! run work-dir iteration))
   (finish-run! run run-config work-dir :verified iteration))
