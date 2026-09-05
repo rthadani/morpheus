@@ -221,10 +221,10 @@
     (git-sh work-dir "reset" "-q")
     d))
 
-(defn- git-commit-phase! [work-dir iteration]
+(defn- git-commit-phase! [work-dir iteration summary]
   (git-sh work-dir "add" "-A")
-  (git-sh work-dir "commit" "-q" "--allow-empty" "-m"
-          (str "morpheus:phase-end iter-" iteration)))
+  (git-sh work-dir "commit" "-q" "--allow-empty"
+          "-m" (str "iter-" iteration ": " summary)))
 
 (defn- git-restore! [work-dir]
   (log/info "Restoring work-dir via git reset --hard" {:dir work-dir})
@@ -676,7 +676,7 @@
           :else
           (do (git-sh work-dir "add" "-A")
               (git-sh work-dir "commit" "-q" "--allow-empty"
-                      "-m" (str "morpheus:polish iter-" iteration))
+                      "-m" (str "iter-" iteration ": polish pass"))
               (emit! run {:type :polish-complete :iteration iteration})))))
     (catch Exception e
       (log/warn "Polish pass failed — finalising verified run anyway"
@@ -968,8 +968,15 @@
                     _  (write-snapshot! run)
                     _  (store/persist-run! run)
                     ctx (iteration-context run run-config ev iteration)
-                    commit-phase! (fn [] (when (:phase-ended? ctx)
-                                           (git-commit-phase! work-dir iteration)))]
+                    commit-phase! (fn []
+                                    (when (:phase-ended? ctx)
+                                      (let [raw (or (get-in ctx [:review :summary])
+                                                    (first (:plan control-packet))
+                                                    "phase complete")
+                                            msg (if (> (count raw) 60)
+                                                  (str (subs raw 0 60) "…")
+                                                  raw)]
+                                        (git-commit-phase! work-dir iteration msg))))]
                 (cond
                   (:pause? ctx)
                   (do
